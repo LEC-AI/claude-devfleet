@@ -140,6 +140,18 @@ CREATE TABLE IF NOT EXISTS mcp_configs (
 
 CREATE INDEX IF NOT EXISTS idx_mcp_configs_project
     ON mcp_configs(project_id);
+
+CREATE TABLE IF NOT EXISTS lanes (
+    name TEXT PRIMARY KEY,
+    max_agents INTEGER NOT NULL DEFAULT 1,
+    default_model TEXT NOT NULL DEFAULT 'claude-sonnet-4-6',
+    tool_preset TEXT NOT NULL DEFAULT 'implement',
+    append_prompt TEXT DEFAULT '',
+    color TEXT DEFAULT '#888888',
+    icon TEXT DEFAULT '',
+    enabled INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 
@@ -170,6 +182,8 @@ async def init_db():
             "ALTER TABLE missions ADD COLUMN schedule_enabled INTEGER DEFAULT 0",
             "ALTER TABLE missions ADD COLUMN last_scheduled_at TEXT",
             "ALTER TABLE missions ADD COLUMN mission_number INTEGER",
+            # v4: agentic lanes
+            "ALTER TABLE missions ADD COLUMN lane TEXT DEFAULT 'coder'",
         ]
         for migration in migrations:
             try:
@@ -187,6 +201,40 @@ async def init_db():
                 ) numbered WHERE numbered.id = missions.id
             ) WHERE mission_number IS NULL
         """)
+
+        # Seed default lanes (imported here to avoid top-level circular import)
+        from models import LANE_DEFAULTS
+        for name, policy in LANE_DEFAULTS.items():
+            await db.execute(
+                """INSERT OR IGNORE INTO lanes
+                   (name, max_agents, default_model, tool_preset, append_prompt, color, icon)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    name,
+                    policy["max_agents"],
+                    policy["default_model"],
+                    policy["tool_preset"],
+                    policy["append_prompt"],
+                    policy["color"],
+                    policy["icon"],
+                ),
+            )
+
+        # Backfill missions.lane from mission_type for existing rows
+        await db.execute("""
+            UPDATE missions SET lane = CASE mission_type
+                WHEN 'implement' THEN 'coder'
+                WHEN 'fix'       THEN 'coder'
+                WHEN 'full'      THEN 'coder'
+                WHEN 'review'    THEN 'reviewer'
+                WHEN 'test'      THEN 'tester'
+                WHEN 'explore'   THEN 'explorer'
+                WHEN 'planner'   THEN 'planner'
+                ELSE 'coder'
+            END
+            WHERE lane IS NULL OR lane = ''
+        """)
+
         await db.commit()
 
 
