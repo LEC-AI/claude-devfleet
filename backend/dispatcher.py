@@ -227,6 +227,7 @@ async def dispatch_mission(session_id: str, mission: dict, last_report: dict | N
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env={**os.environ},
+            limit=10 * 1024 * 1024,
         )
         _processes[session_id] = process
 
@@ -472,6 +473,7 @@ async def resume_mission(session_id: str, mission: dict, claude_session_id: str,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env={**os.environ},
+            limit=10 * 1024 * 1024,
         )
         _processes[session_id] = process
 
