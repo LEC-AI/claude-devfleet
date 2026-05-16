@@ -468,7 +468,7 @@ export default function StatusPage({ navigate }) {
         fontSize: 12,
         color: 'var(--text-dim)',
       }}>
-        <span>Powered by Claude DevFleet</span>
+        <span>Built by Farhan · Farhan's DevFleet™</span>
         <span>Auto-refreshes every 30 seconds</span>
       </div>
 

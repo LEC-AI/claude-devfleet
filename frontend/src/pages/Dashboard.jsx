@@ -127,7 +127,7 @@ export default function Dashboard({ navigate }) {
             textTransform: 'uppercase',
             marginBottom: 8,
           }}>
-            Claude DevFleet
+            Farhan's DevFleet™
           </p>
           <h2 style={{
             fontSize: 36,
@@ -144,6 +144,22 @@ export default function Dashboard({ navigate }) {
           <p style={{ fontSize: 14, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
             {clock}
           </p>
+          <div style={{
+            display: 'flex', gap: 16, marginTop: 10,
+            fontFamily: 'var(--font-mono)', fontSize: 11,
+            color: 'var(--text-dim)', letterSpacing: '0.04em',
+          }}>
+            <span><span style={{ color: 'var(--accent-text)', fontWeight: 700 }}>18</span> slots</span>
+            <span style={{ opacity: 0.3 }}>·</span>
+            <span><span style={{ color: 'var(--accent-text)', fontWeight: 700 }}>10</span> lanes</span>
+            <span style={{ opacity: 0.3 }}>·</span>
+            <span>
+              <span style={{ color: stats.running_agents > 0 ? 'var(--warning)' : 'var(--text-dim)', fontWeight: 700 }}>
+                {stats.running_agents}
+              </span>
+              {' '}active
+            </span>
+          </div>
         </div>
       </div>
 

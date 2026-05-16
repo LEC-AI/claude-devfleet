@@ -556,7 +556,7 @@ export default function LiveOutput({ events, status }) {
             </span>
           )}
         </div>
-        <span style={{ color: '#2d3748', fontSize: 10 }}>Claude DevFleet</span>
+        <span style={{ color: '#2d3748', fontSize: 10 }}>Farhan's DevFleet™</span>
       </div>
     </div>
   );

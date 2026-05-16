@@ -29,8 +29,8 @@ export default function Sidebar({ activePage, navigate }) {
   return (
     <aside className="sidebar">
       <div className="sidebar-logo">
-        <h1>Claude <span className="logo-gradient">DevFleet</span></h1>
-        <p>Coding Team Orchestrator</p>
+        <h1>Farhan's <span className="logo-gradient">DevFleet</span><sup style={{fontSize:'0.45em',marginLeft:3,opacity:0.6,verticalAlign:'super'}}>™</sup></h1>
+        <p style={{fontSize:11,opacity:0.45,fontStyle:'italic',marginTop:3,marginBottom:2}}>by Farhan · v2026.05</p>
         <p className="powered-by">Powered by Claude Code</p>
       </div>
 
@@ -62,7 +62,7 @@ export default function Sidebar({ activePage, navigate }) {
             {' '}agent{runningAgents !== 1 ? 's' : ''} running
           </div>
         </div>
-        <div className="sidebar-version">v2.0</div>
+        <div className="sidebar-version">v2026.05</div>
       </div>
     </aside>
   );
