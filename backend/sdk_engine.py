@@ -133,6 +133,7 @@ def _build_sdk_options(
     mission: dict,
     opts: DispatchOptions | None,
     work_dir: str,
+    project_path: str = "",
     session_id: str = "",
     resume_session_id: str | None = None,
     extra_mcp_servers: dict | None = None,
@@ -412,6 +413,7 @@ async def _run_agent(
 
         sdk_options = _build_sdk_options(
             mission, opts, work_dir,
+            project_path=project_path,
             session_id=session_id,
             resume_session_id=resume_session_id,
             extra_mcp_servers=extra_mcp or None,
