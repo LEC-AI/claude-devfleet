@@ -72,32 +72,79 @@ async def create_worktree(project_path: str, session_id: str) -> str | None:
     return worktree_path
 
 
-async def cleanup_worktree(project_path: str, session_id: str, merge: bool = False):
-    """Remove a worktree. Optionally merge its branch first."""
+async def cleanup_worktree(project_path: str, session_id: str, merge: bool = False) -> bool:
+    """Remove a worktree. Optionally safe-merge its branch first.
+
+    Safe-merge protocol:
+    1. Check for new commits on the branch.
+    2. Attempt merge with --no-commit --no-ff (dry run).
+    3. If conflicts detected → abort, preserve worktree, return False.
+    4. If clean → complete the merge with a descriptive commit message.
+    5. Verify no conflict markers leaked into tracked files.
+    """
     short_id = session_id[:8]
     branch_name = f"devfleet/{short_id}"
     worktree_path = os.path.join(project_path, ".devfleet-worktrees", f"session-{short_id}")
 
     if merge:
-        # Check if there are commits to merge
+        # Step 1: any commits to merge?
         code, out, _ = await _run(
             ["git", "log", f"HEAD..{branch_name}", "--oneline"],
             project_path,
         )
         if code == 0 and out.strip():
-            code, out, err = await _run(
-                ["git", "merge", "--no-ff", "-m", f"Claude DevFleet: merge session {short_id}", branch_name],
+            # Step 2: dry-run merge — detect conflicts without committing
+            code, _, err = await _run(
+                ["git", "merge", "--no-commit", "--no-ff", branch_name],
+                project_path,
+            )
+
+            # Step 3: check for unmerged paths (conflict markers)
+            _, unmerged, _ = await _run(
+                ["git", "diff", "--name-only", "--diff-filter=U"],
+                project_path,
+            )
+
+            if unmerged.strip():
+                # Conflicts — abort and preserve worktree for human/orchestrator resolution
+                await _run(["git", "merge", "--abort"], project_path)
+                log.warning(
+                    "Safe-merge CONFLICT for session %s — conflicts in: %s. "
+                    "Worktree preserved at %s for resolution.",
+                    short_id, unmerged.strip().replace("\n", ", "), worktree_path,
+                )
+                return False
+
+            # Step 4: also verify no stray conflict markers in any tracked file
+            _, marker_files, _ = await _run(
+                ["git", "grep", "-l", "<<<<<<", "--cached"],
+                project_path,
+            )
+            if marker_files.strip():
+                await _run(["git", "merge", "--abort"], project_path)
+                log.warning(
+                    "Safe-merge MARKER check failed for session %s — conflict markers in: %s.",
+                    short_id, marker_files.strip().replace("\n", ", "),
+                )
+                return False
+
+            # Step 5: clean — finalise the merge
+            code, _, err = await _run(
+                ["git", "commit", "--no-edit", "-m",
+                 f"Farhanmerge(devfleet): integrate session {short_id}"],
                 project_path,
             )
             if code != 0:
-                log.warning("Auto-merge failed for session %s: %s. Worktree preserved.", short_id, err)
+                log.warning("Merge commit failed for session %s: %s", short_id, err)
+                await _run(["git", "merge", "--abort"], project_path)
                 return False
+
+            log.info("Safe-merge completed for session %s", short_id)
 
     # Remove worktree
     code, _, err = await _run(["git", "worktree", "remove", "--force", worktree_path], project_path)
     if code != 0:
         log.warning("Failed to remove worktree %s: %s", worktree_path, err)
-        # Fallback: just delete the dir
         if os.path.exists(worktree_path):
             shutil.rmtree(worktree_path, ignore_errors=True)
 

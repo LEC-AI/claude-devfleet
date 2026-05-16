@@ -55,7 +55,7 @@ _cl.parse_message = _patched_parse
 import db
 from prompt_template import build_prompt
 from worktree import create_worktree, cleanup_worktree
-from models import TOOL_PRESETS, DispatchOptions
+from models import TOOL_PRESETS, LANE_DEFAULTS, MISSION_TYPE_TO_LANE, DispatchOptions
 
 log = logging.getLogger("devfleet.sdk_engine")
 
@@ -65,6 +65,21 @@ _subscribers: dict[str, list[asyncio.Queue]] = {}
 _event_buffers: dict[str, list[dict]] = {}
 # Sessions being taken over — worktree is preserved on cancel
 _takeover_sessions: set[str] = {}
+
+# ── Lane helpers (lightweight; full accounting lives in lanes.py) ──
+# Pre-build prompt cache from LANE_DEFAULTS so _build_sdk_options has O(1) lookup
+_LANE_PROMPT_CACHE: dict[str, str] = {
+    name: policy["append_prompt"]
+    for name, policy in LANE_DEFAULTS.items()
+}
+
+
+def _derive_lane(mission: dict) -> str:
+    """Resolve the effective lane for a mission (mirrors lanes.derive_lane)."""
+    lane = (mission.get("lane") or "").strip()
+    if lane:
+        return lane
+    return MISSION_TYPE_TO_LANE.get(mission.get("mission_type", "implement"), "coder")
 
 
 # ── MCP Server Integration (Phase 2) ──
@@ -163,15 +178,30 @@ def _build_sdk_options(
         "mcp__devfleet-tools__list_project_missions",
     ])
 
-    # System prompt
-    append_prompt = opts.append_system_prompt if opts and opts.append_system_prompt else None
+    # System prompt: lane policy → mission override → per-dispatch override
+    # Also inject auto-compact instruction (verified: no native SDK setting for this)
+    lane_name = _derive_lane(mission)
+    lane_prompt = _LANE_PROMPT_CACHE.get(lane_name, "")
+    compact_instruction = (
+        "\n\nCONTEXT MANAGEMENT: When your context window approaches 199,000 tokens, "
+        "immediately run /compact before continuing. Do not wait for it to fill completely."
+    )
+    if opts and opts.append_system_prompt:
+        append_prompt = opts.append_system_prompt + compact_instruction
+    elif lane_prompt:
+        append_prompt = lane_prompt + compact_instruction
+    else:
+        append_prompt = compact_instruction.strip()
 
-    # Max turns
+    # Max turns: worktree missions default to 200 (high complexity tolerance)
     max_turns = None
     if opts and opts.max_turns:
         max_turns = opts.max_turns
     elif mission.get("max_turns"):
         max_turns = mission["max_turns"]
+    # High worktree complexity tolerance — no turn limit cap when isolated
+    if max_turns is None and work_dir != project_path:
+        max_turns = 200
 
     # MCP servers — auto-attach DevFleet context + tools as stdio servers
     python_path = sys.executable
@@ -224,6 +254,24 @@ def _build_sdk_options(
     if extra_mcp_servers:
         mcp_servers.update(extra_mcp_servers)
 
+    # ECC global access — agents can read ~/.claude skills, memory, and CLAUDE.md
+    # regardless of which repo or worktree they run in
+    global_ecc = os.path.expanduser("~/.claude")
+    add_dirs: list[str] = []
+    if os.path.isdir(global_ecc):
+        add_dirs.append(global_ecc)
+
+    # Learn-eval Stop hook — every agent session extracts reusable patterns
+    learn_eval_cmd = f"claude -p '/learn-eval' --output-format=text 2>/dev/null || true"
+    stop_hooks = {
+        "Stop": [
+            {
+                "matcher": "*",
+                "hooks": [{"type": "command", "command": learn_eval_cmd}],
+            }
+        ]
+    }
+
     kwargs = dict(
         model=model,
         max_turns=max_turns,
@@ -233,9 +281,12 @@ def _build_sdk_options(
         cwd=work_dir,
         resume=resume_session_id,
         include_partial_messages=False,
+        hooks=stop_hooks,
     )
     if mcp_servers:
         kwargs["mcp_servers"] = mcp_servers
+    if add_dirs:
+        kwargs["add_dirs"] = add_dirs
     return ClaudeCodeOptions(**kwargs)
 
 

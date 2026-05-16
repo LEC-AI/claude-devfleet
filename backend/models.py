@@ -18,69 +18,192 @@ class ProjectUpdate(BaseModel):
 # Controls how the Claude CLI agent is spawned per mission
 
 TOOL_PRESETS = {
-    "full": ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "WebFetch", "WebSearch"],
-    "implement": ["Read", "Write", "Edit", "Bash", "Grep", "Glob"],
-    "review": ["Read", "Grep", "Glob", "Bash(git diff *)", "Bash(git log *)"],
-    "test": ["Read", "Edit", "Bash(npm test *)", "Bash(pytest *)", "Bash(cargo test *)", "Grep", "Glob"],
-    "explore": ["Read", "Grep", "Glob", "Bash(git *)", "Bash(ls *)", "Bash(find *)"],
-    "fix": ["Read", "Write", "Edit", "Bash", "Grep", "Glob"],
-    "planner": ["Read", "Grep", "Glob", "WebFetch"],
+    "full":         ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "WebFetch", "WebSearch"],
+    "implement":    ["Read", "Write", "Edit", "Bash", "Grep", "Glob"],
+    "review":       ["Read", "Grep", "Glob", "Bash(git diff *)", "Bash(git log *)", "Bash(git blame *)"],
+    "security":     ["Read", "Grep", "Glob", "Bash(git diff *)", "Bash(grep *)"],
+    "test":         ["Read", "Write", "Edit", "Bash(npm test *)", "Bash(pytest *)", "Bash(cargo test *)", "Bash(npx playwright *)", "Grep", "Glob"],
+    "e2e":          ["Read", "Bash(npx playwright *)", "Bash(curl *)", "Bash(npm run *)", "Grep", "Glob"],
+    "qa":           ["Read", "Write", "Edit", "Bash", "Grep", "Glob"],
+    "explore":      ["Read", "Grep", "Glob", "Bash(git *)", "Bash(ls *)", "Bash(find *)"],
+    "fix":          ["Read", "Write", "Edit", "Bash", "Grep", "Glob"],
+    "orchestrator": ["Read", "Grep", "Glob", "WebFetch", "WebSearch"],
+    "researcher":   ["Read", "Grep", "Glob", "WebFetch", "WebSearch"],
 }
 
-# Lane definitions — scheduling dimension separate from mission_type tool presets.
-# mission_type drives which tools the agent gets; lane drives how many agents run in parallel.
+_GLOBAL_ECC = "~/.claude"  # injected into every agent via add_dirs
+
+# ── Lane definitions ──────────────────────────────────────────────────────────
+# Scheduling dimension — independent of mission_type tool presets.
+# Each lane has its own concurrency cap, default model, tools, and role prompt.
+# Total concurrent agents = sum of all max_agents values.
 LANE_DEFAULTS: dict[str, dict] = {
+
+    # ── Orchestrators (3 slots) — plan, coordinate, decompose ────────────────
+    "orchestrator": {
+        "max_agents": 3,
+        "default_model": "claude-opus-4-6",
+        "tool_preset": "orchestrator",
+        "append_prompt": (
+            "You are a DevFleet **Orchestrator**. Your role is coordination and planning.\n"
+            "Use /prp-plan to produce implementation plans. Then /prompt-optimizer to sharpen them.\n"
+            "Break large features into sub-missions via create_sub_mission, assign correct lanes.\n"
+            "Advise opus frequently — call the advisor tool at every fork. Never guess on architecture."
+        ),
+        "color": "#b44ff7",
+        "icon": "🧠",
+    },
+
+    # ── Coders (3 slots) — land features ─────────────────────────────────────
     "coder": {
-        "max_agents": 2,
+        "max_agents": 3,
         "default_model": "claude-sonnet-4-6",
         "tool_preset": "implement",
-        "append_prompt": "You are a DevFleet **Coder** agent. Your role is implementation: write clean, production-quality code.",
+        "append_prompt": (
+            "You are a DevFleet **Coder**. Your role is implementation.\n"
+            "Follow the /prp-implement plan exactly. Write atomic commits. Use /tdd.\n"
+            "Before merging: check for conflicts with git merge --no-commit --no-ff first.\n"
+            "If conflicts exist, abort and emit a sub-mission to the orchestrator lane.\n"
+            "Context limit: when approaching 199k tokens, run /compact immediately."
+        ),
         "color": "#4f8ef7",
         "icon": "🛠",
     },
+
+    # ── Code Reviewer (2 slots) ───────────────────────────────────────────────
     "reviewer": {
-        "max_agents": 1,
+        "max_agents": 2,
         "default_model": "claude-sonnet-4-6",
         "tool_preset": "review",
-        "append_prompt": "You are a DevFleet **Reviewer** agent. Your role is code review: read-only analysis, find bugs, security issues, and improvement opportunities.",
+        "append_prompt": (
+            "You are a DevFleet **Code Reviewer**. Read-only analysis only.\n"
+            "Check: naming, patterns, error handling, test coverage, git hygiene.\n"
+            "Score each dimension 0-10. Fail anything below 7. Be specific with line numbers.\n"
+            "Use the code-reviewer ECC skill for systematic review."
+        ),
         "color": "#f7a84f",
         "icon": "🔍",
     },
+
+    # ── Security Reviewer (1 slot) ────────────────────────────────────────────
+    "security": {
+        "max_agents": 1,
+        "default_model": "claude-sonnet-4-6",
+        "tool_preset": "security",
+        "append_prompt": (
+            "You are a DevFleet **Security Reviewer**. Hunt vulnerabilities only.\n"
+            "Check: OWASP Top 10, hardcoded secrets, injection, auth bypasses, unsafe deps.\n"
+            "Use the security-reviewer ECC skill. Flag CRITICAL/HIGH/MEDIUM/LOW.\n"
+            "BLOCK merge on any CRITICAL finding."
+        ),
+        "color": "#f74f4f",
+        "icon": "🔒",
+    },
+
+    # ── Unit/Integration Tester (2 slots) ─────────────────────────────────────
     "tester": {
         "max_agents": 2,
         "default_model": "claude-haiku-4-5-20251001",
         "tool_preset": "test",
-        "append_prompt": "You are a DevFleet **Tester** agent. Your role is writing and running tests: unit, integration, and E2E coverage.",
+        "append_prompt": (
+            "You are a DevFleet **Tester**. Write and run unit + integration tests.\n"
+            "Minimum 80% coverage. Use /tdd — write test first, fail, implement, pass.\n"
+            "Use the python-testing or tdd-workflow ECC skill.\n"
+            "All tests must pass before submitting report."
+        ),
         "color": "#4fc97b",
         "icon": "🧪",
     },
-    "planner": {
-        "max_agents": 1,
-        "default_model": "claude-opus-4-6",
-        "tool_preset": "planner",
-        "append_prompt": "You are a DevFleet **Planner** agent. Your role is architecture and research: read widely, think deeply, propose concrete plans.",
-        "color": "#b44ff7",
-        "icon": "🗺",
+
+    # ── E2E Verifier (2 slots) ────────────────────────────────────────────────
+    "e2e": {
+        "max_agents": 2,
+        "default_model": "claude-sonnet-4-6",
+        "tool_preset": "e2e",
+        "append_prompt": (
+            "You are a DevFleet **E2E Verifier**. Run end-to-end and acceptance tests.\n"
+            "Use Playwright for web, curl for APIs, runtime execution for CLI tools.\n"
+            "Use the e2e-testing ECC skill. Capture screenshots on failure.\n"
+            "Verify the golden path AND 3 edge cases minimum."
+        ),
+        "color": "#4ff7e8",
+        "icon": "🌐",
     },
+
+    # ── QA Agent (1 slot) ─────────────────────────────────────────────────────
+    "qa": {
+        "max_agents": 1,
+        "default_model": "claude-sonnet-4-6",
+        "tool_preset": "qa",
+        "append_prompt": (
+            "You are a DevFleet **QA Agent**. Holistic quality gatekeeper.\n"
+            "Check: UX flows, accessibility, performance budgets, error messaging, docs accuracy.\n"
+            "Run /verify. Score release readiness 0-100. Below 80 = not shippable."
+        ),
+        "color": "#f7d44f",
+        "icon": "✅",
+    },
+
+    # ── Dynamic Tester (1 slot) ───────────────────────────────────────────────
+    "dynamic_tester": {
+        "max_agents": 1,
+        "default_model": "claude-sonnet-4-6",
+        "tool_preset": "test",
+        "append_prompt": (
+            "You are a DevFleet **Dynamic Tester**. Runtime and chaos testing.\n"
+            "Inject failures: bad inputs, race conditions, resource exhaustion, network timeouts.\n"
+            "Verify graceful degradation and error recovery in all cases.\n"
+            "Use the ai-regression-testing ECC skill."
+        ),
+        "color": "#f7974f",
+        "icon": "⚡",
+    },
+
+    # ── Researcher (2 slots) — feasibility + sustainability ───────────────────
+    "researcher": {
+        "max_agents": 2,
+        "default_model": "claude-opus-4-6",
+        "tool_preset": "researcher",
+        "append_prompt": (
+            "You are a DevFleet **Researcher**. Feasibility and sustainability analysis.\n"
+            "Investigate: library alternatives, dependency risks, license compliance, long-term maintenance cost.\n"
+            "Use the search-first and market-research ECC skills.\n"
+            "Output: recommendation with evidence and risk rating."
+        ),
+        "color": "#a0a0f7",
+        "icon": "🔬",
+    },
+
+    # ── Explorer (1 slot) — codebase discovery ────────────────────────────────
     "explorer": {
         "max_agents": 1,
         "default_model": "claude-sonnet-4-6",
         "tool_preset": "explore",
-        "append_prompt": "You are a DevFleet **Explorer** agent. Your role is discovery: map the codebase, find dependencies, surface unknowns.",
+        "append_prompt": (
+            "You are a DevFleet **Explorer**. Map the codebase and surface unknowns.\n"
+            "Build dependency graphs, find dead code, identify coupling hotspots.\n"
+            "Use the code-explorer ECC agent. Output structured findings for orchestrators."
+        ),
         "color": "#f74f6b",
         "icon": "🔭",
     },
 }
 
-# Mapping from mission_type to default lane name
+# Mapping from mission_type → default lane
 MISSION_TYPE_TO_LANE: dict[str, str] = {
-    "implement": "coder",
-    "fix": "coder",
-    "full": "coder",
-    "review": "reviewer",
-    "test": "tester",
-    "explore": "explorer",
-    "planner": "planner",
+    "implement":    "coder",
+    "fix":          "coder",
+    "full":         "coder",
+    "review":       "reviewer",
+    "security":     "security",
+    "test":         "tester",
+    "e2e":          "e2e",
+    "qa":           "qa",
+    "dynamic_test": "dynamic_tester",
+    "explore":      "explorer",
+    "planner":      "orchestrator",
+    "orchestrator": "orchestrator",
+    "research":     "researcher",
 }
 
 MODEL_CHOICES = ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
