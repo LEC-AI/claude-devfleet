@@ -195,7 +195,7 @@ async def dispatch_mission(session_id: str, mission: dict, last_report: dict | N
 
     try:
         # Create isolated worktree if project is a git repo
-        worktree_path = await create_worktree(project_path, session_id)
+        worktree_path, _ = await create_worktree(project_path, session_id)
         work_dir = worktree_path or project_path
 
         # Build CLI args from mission config + dispatch overrides
@@ -456,7 +456,7 @@ async def resume_mission(session_id: str, mission: dict, claude_session_id: str,
 
     try:
         # Use same worktree if project is git repo
-        worktree_path = await create_worktree(project_path, session_id)
+        worktree_path, _ = await create_worktree(project_path, session_id)
         work_dir = worktree_path or project_path
 
         # Build CLI args with resume flag

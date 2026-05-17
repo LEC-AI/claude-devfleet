@@ -420,6 +420,7 @@ async def _run_agent(
     existing_output: str = "",
     existing_cost: float = 0.0,
     existing_tokens: int = 0,
+    worktree_branch: str | None = None,
 ):
     """Unified agent runner for both dispatch and resume."""
     output_chunks = []
@@ -644,7 +645,7 @@ async def _run_agent(
 
         # Cleanup worktree — auto-merge if successful
         if worktree_path:
-            await cleanup_worktree(project_path, session_id, merge=True)
+            await cleanup_worktree(project_path, session_id, merge=True, branch_name=worktree_branch)
 
         watchdog_task.cancel()
         _broadcast(session_id, {
@@ -686,7 +687,7 @@ async def _run_agent(
 
         if worktree_path and not is_takeover:
             # Only delete worktree on regular cancel, NOT on takeover
-            await cleanup_worktree(project_path, session_id, merge=False)
+            await cleanup_worktree(project_path, session_id, merge=False, branch_name=worktree_branch)
         _broadcast(session_id, {"type": "done", "status": new_status})
 
     except Exception as e:
@@ -744,7 +745,7 @@ async def _run_agent(
             await conn.close()
 
         if worktree_path:
-            await cleanup_worktree(project_path, session_id, merge=False)
+            await cleanup_worktree(project_path, session_id, merge=False, branch_name=worktree_branch)
         _broadcast(session_id, {"type": "done", "status": "failed", "error": str(e),
                                   "failure_layer": failure_layer})
 
@@ -783,8 +784,19 @@ async def dispatch_mission(
     full_prompt = build_prompt(mission, last_report)
     project_path = resolve_path(mission["project_path"])
 
-    worktree_path = await create_worktree(project_path, session_id)
+    worktree_path, worktree_branch = await create_worktree(project_path, session_id, mission=mission)
     work_dir = worktree_path or project_path
+
+    if worktree_branch:
+        _conn = await db.get_db()
+        try:
+            await _conn.execute(
+                "UPDATE agent_sessions SET branch_name=? WHERE id=?",
+                (worktree_branch, session_id),
+            )
+            await _conn.commit()
+        finally:
+            await _conn.close()
 
     await _run_agent(
         session_id=session_id,
@@ -794,6 +806,7 @@ async def dispatch_mission(
         worktree_path=worktree_path,
         project_path=project_path,
         opts=opts,
+        worktree_branch=worktree_branch,
     )
 
 
@@ -819,8 +832,19 @@ async def resume_mission(
     finally:
         await conn.close()
 
-    worktree_path = await create_worktree(project_path, session_id)
+    worktree_path, worktree_branch = await create_worktree(project_path, session_id, mission=mission)
     work_dir = worktree_path or project_path
+
+    if worktree_branch:
+        _conn = await db.get_db()
+        try:
+            await _conn.execute(
+                "UPDATE agent_sessions SET branch_name=? WHERE id=?",
+                (worktree_branch, session_id),
+            )
+            await _conn.commit()
+        finally:
+            await _conn.close()
 
     await _run_agent(
         session_id=session_id,
@@ -834,6 +858,7 @@ async def resume_mission(
         existing_output=existing.get("output_log", ""),
         existing_cost=existing.get("total_cost_usd") or 0,
         existing_tokens=existing.get("total_tokens") or 0,
+        worktree_branch=worktree_branch,
     )
 
 

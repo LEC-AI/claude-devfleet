@@ -33,27 +33,36 @@ async def is_git_repo(path: str) -> bool:
     return code == 0
 
 
-async def create_worktree(project_path: str, session_id: str) -> str | None:
-    """Create an isolated git worktree for this session. Returns worktree path or None if not a git repo."""
+async def create_worktree(
+    project_path: str,
+    session_id: str,
+    mission: dict | None = None,
+) -> tuple[str | None, str | None]:
+    """Create an isolated git worktree. Returns (worktree_path, branch_name) or (None, None)."""
     if not await is_git_repo(project_path):
         log.info("Project %s is not a git repo — skipping worktree isolation", project_path)
-        return None
+        return None, None
 
     short_id = session_id[:8]
-    branch_name = f"devfleet/{short_id}"
+    if mission:
+        lane = (mission.get("lane") or "").strip() or "coder"
+        mission_num = mission.get("mission_number") or 0
+        branch_name = f"devfleet/{lane}/{mission_num}-{short_id}"
+    else:
+        branch_name = f"devfleet/{short_id}"
     worktree_dir = os.path.join(project_path, ".devfleet-worktrees")
     worktree_path = os.path.join(worktree_dir, f"session-{short_id}")
 
     os.makedirs(worktree_dir, exist_ok=True)
 
-    # Create worktree on a new branch from HEAD
+    # Branch from origin/dev (not HEAD — avoids inheriting operator's feature branch)
     code, out, err = await _run(
-        ["git", "worktree", "add", "-b", branch_name, worktree_path, "HEAD"],
+        ["git", "worktree", "add", "-b", branch_name, worktree_path, "origin/dev"],
         project_path,
     )
     if code != 0:
         log.error("Failed to create worktree: %s", err)
-        return None
+        return None, None
 
     log.info("Created worktree at %s on branch %s", worktree_path, branch_name)
 
@@ -69,10 +78,15 @@ async def create_worktree(project_path: str, session_id: str) -> str | None:
         with open(gitignore_path, "w") as f:
             f.write(f"{marker}/\n")
 
-    return worktree_path
+    return worktree_path, branch_name
 
 
-async def cleanup_worktree(project_path: str, session_id: str, merge: bool = False) -> bool:
+async def cleanup_worktree(
+    project_path: str,
+    session_id: str,
+    merge: bool = False,
+    branch_name: str | None = None,
+) -> bool:
     """Remove a worktree. Optionally safe-merge its branch first.
 
     Safe-merge protocol:
@@ -83,7 +97,9 @@ async def cleanup_worktree(project_path: str, session_id: str, merge: bool = Fal
     5. Verify no conflict markers leaked into tracked files.
     """
     short_id = session_id[:8]
-    branch_name = f"devfleet/{short_id}"
+    # Use provided branch_name (lane-aware naming) or fall back to legacy format
+    if not branch_name:
+        branch_name = f"devfleet/{short_id}"
     worktree_path = os.path.join(project_path, ".devfleet-worktrees", f"session-{short_id}")
 
     if merge:

@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     total_tokens INTEGER DEFAULT 0,
     cache_read_tokens INTEGER DEFAULT 0,
     cache_creation_tokens INTEGER DEFAULT 0,
-    last_activity_at TEXT
+    last_activity_at TEXT,
+    branch_name TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS reports (
@@ -163,6 +164,9 @@ async def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=5000")
+        await db.execute("PRAGMA synchronous=NORMAL")
+        await db.execute("PRAGMA cache_size=-64000")
         await db.execute("PRAGMA foreign_keys=ON")
         await db.executescript(SCHEMA)
         # Migrations for existing DBs
@@ -194,6 +198,8 @@ async def init_db():
             "ALTER TABLE agent_sessions ADD COLUMN last_activity_at TEXT",
             "ALTER TABLE agent_sessions ADD COLUMN cache_read_tokens INTEGER DEFAULT 0",
             "ALTER TABLE agent_sessions ADD COLUMN cache_creation_tokens INTEGER DEFAULT 0",
+            # v7: lane-aware branch naming
+            "ALTER TABLE agent_sessions ADD COLUMN branch_name TEXT DEFAULT ''",
         ]
         for migration in migrations:
             try:
@@ -282,4 +288,7 @@ async def get_db():
     db = await aiosqlite.connect(DB_PATH)
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA foreign_keys=ON")
+    await db.execute("PRAGMA busy_timeout=5000")
+    await db.execute("PRAGMA synchronous=NORMAL")
+    await db.execute("PRAGMA cache_size=-64000")
     return db
