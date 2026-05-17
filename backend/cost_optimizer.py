@@ -164,7 +164,7 @@ def _identify_optimizations(
                 "type": "mission_model_downgrade",
                 "mission_type": mtype,
                 "current_avg_cost": avg_cost,
-                "current_model": "likely claude-opus-4-6",
+                "current_model": "likely claude-opus-4-7",
                 "suggested_model": "claude-sonnet-4-6",
                 "potential_savings": round(potential_savings, 2),
                 "rationale": f"{mtype} missions average ${avg_cost:.2f}. These could use Sonnet.",

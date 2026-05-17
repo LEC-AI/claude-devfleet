@@ -31,7 +31,7 @@ def _build_cli_args(mission: dict, opts: DispatchOptions | None = None) -> list[
     ]
 
     # Model: override > mission > default
-    model = "claude-opus-4-6"
+    model = "claude-opus-4-7"
     if opts and opts.model:
         model = opts.model
     elif mission.get("model"):
@@ -202,7 +202,7 @@ async def dispatch_mission(session_id: str, mission: dict, last_report: dict | N
         cli_args = _build_cli_args(mission, opts)
         cli_args += ["-p", full_prompt]
 
-        model_used = "claude-opus-4-6"
+        model_used = "claude-opus-4-7"
         if opts and opts.model:
             model_used = opts.model
         elif mission.get("model"):

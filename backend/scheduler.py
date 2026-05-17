@@ -130,7 +130,7 @@ async def _check_schedules():
                  template.get("acceptance_criteria", ""),
                  template.get("priority", 0),
                  json.dumps(tags),
-                 template.get("model", "claude-opus-4-6"),
+                 template.get("model", "claude-opus-4-7"),
                  template.get("max_turns"),
                  template.get("max_budget_usd"),
                  template.get("allowed_tools", ""),

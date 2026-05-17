@@ -101,7 +101,7 @@ TOOLS = [
                 },
                 "auto_dispatch": {"type": "boolean", "description": "Auto-dispatch when dependencies complete"},
                 "priority": {"type": "integer", "description": "Priority (0=normal, 1=high, 2=critical)"},
-                "model": {"type": "string", "description": "Model to use (default: claude-sonnet-4-20250514)"},
+                "model": {"type": "string", "description": "Model to use (default: claude-sonnet-4-6)"},
             },
             "required": ["project_id", "title", "prompt"],
         },
@@ -344,7 +344,7 @@ async def _create_mission(args: dict, conn) -> dict:
             depends_on,
             auto_dispatch,
             args.get("priority", 0),
-            args.get("model", "claude-sonnet-4-20250514"),
+            args.get("model", "claude-sonnet-4-6"),
             next_num,
         ),
     )
@@ -397,7 +397,7 @@ async def _dispatch_mission(args: dict, conn) -> dict:
 
     # Create session in DB (matches app.py flow)
     session_id = str(_uuid.uuid4())
-    model_used = args.get("model") or mission.get("model") or "claude-opus-4-6"
+    model_used = args.get("model") or mission.get("model") or "claude-sonnet-4-6"
     await conn.execute(
         "INSERT INTO agent_sessions (id, mission_id, model) VALUES (?, ?, ?)",
         (session_id, mid, model_used),

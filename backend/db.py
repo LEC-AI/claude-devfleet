@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS missions (
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     tags TEXT DEFAULT '[]',
-    model TEXT DEFAULT 'claude-opus-4-6',
+    model TEXT DEFAULT 'claude-sonnet-4-6',
     max_turns INTEGER,
     max_budget_usd REAL,
     allowed_tools TEXT DEFAULT '',
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     exit_code INTEGER,
     output_log TEXT DEFAULT '',
     error_log TEXT DEFAULT '',
-    model TEXT DEFAULT 'claude-opus-4-6',
+    model TEXT DEFAULT 'claude-sonnet-4-6',
     token_usage TEXT DEFAULT '{}',
     claude_session_id TEXT DEFAULT '',
     remote_url TEXT DEFAULT '',
@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS mission_events (
     event_type TEXT NOT NULL,
     source_mission_id TEXT,
     data TEXT DEFAULT '{}',
+    failure_layer TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -166,7 +167,7 @@ async def init_db():
             "ALTER TABLE agent_sessions ADD COLUMN claude_session_id TEXT DEFAULT ''",
             "ALTER TABLE reports ADD COLUMN preview_url TEXT DEFAULT ''",
             # v2: Claude Code power features
-            "ALTER TABLE missions ADD COLUMN model TEXT DEFAULT 'claude-opus-4-6'",
+            "ALTER TABLE missions ADD COLUMN model TEXT DEFAULT 'claude-sonnet-4-6'",
             "ALTER TABLE missions ADD COLUMN max_turns INTEGER",
             "ALTER TABLE missions ADD COLUMN max_budget_usd REAL",
             "ALTER TABLE missions ADD COLUMN allowed_tools TEXT DEFAULT ''",
@@ -184,12 +185,22 @@ async def init_db():
             "ALTER TABLE missions ADD COLUMN mission_number INTEGER",
             # v4: agentic lanes
             "ALTER TABLE missions ADD COLUMN lane TEXT DEFAULT 'coder'",
+            # v5: failure layer classification (dispatch vs agent)
+            "ALTER TABLE mission_events ADD COLUMN failure_layer TEXT",
         ]
         for migration in migrations:
             try:
                 await db.execute(migration)
             except Exception:
                 pass  # Column already exists
+
+        # Re-sync lane prompts from LANE_DEFAULTS (INSERT OR IGNORE won't update stale rows)
+        from models import LANE_DEFAULTS as _LD
+        for _lane_name, _policy in _LD.items():
+            await db.execute(
+                "UPDATE lanes SET append_prompt=? WHERE name=?",
+                (_policy["append_prompt"], _lane_name),
+            )
 
         # Backfill mission_number for existing missions that don't have one
         # Use a CTE with ROW_NUMBER to assign sequential numbers per project

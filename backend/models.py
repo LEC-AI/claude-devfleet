@@ -42,9 +42,17 @@ LANE_DEFAULTS: dict[str, dict] = {
     # ── Orchestrators (3 slots) — plan, coordinate, decompose ────────────────
     "orchestrator": {
         "max_agents": 3,
-        "default_model": "claude-opus-4-6",
+        "default_model": "claude-opus-4-7",
         "tool_preset": "orchestrator",
         "append_prompt": (
+            "BEFORE proposing any DAG parallelism, your FIRST tool calls MUST be "
+            "`mcp__devfleet-tools__list_project_missions` and the DevFleet dashboard read "
+            "(get_dashboard via devfleet-context MCP). Read current fleet shape — slots per lane, "
+            "free capacity — and shape the DAG accordingly. Do NOT assume the default 3-slot fleet. "
+            "The operator may have scaled to 18 slots across 10 lanes "
+            "(orchestrator×3, coder×3, reviewer×2, security×1, tester×2, e2e×2, "
+            "qa×1, dynamic_tester×1, researcher×2, explorer×1). "
+            "Shape parallelism to ACTUAL capacity, not assumed defaults.\n\n"
             "You are a DevFleet **Orchestrator**. Your role is coordination and planning.\n"
             "Use /prp-plan to produce implementation plans. Then /prompt-optimizer to sharpen them.\n"
             "Break large features into sub-missions via create_sub_mission, assign correct lanes.\n"
@@ -64,7 +72,12 @@ LANE_DEFAULTS: dict[str, dict] = {
             "Follow the /prp-implement plan exactly. Write atomic commits. Use /tdd.\n"
             "Before merging: check for conflicts with git merge --no-commit --no-ff first.\n"
             "If conflicts exist, abort and emit a sub-mission to the orchestrator lane.\n"
-            "Context limit: when approaching 199k tokens, run /compact immediately."
+            "Context limit: when approaching 199k tokens, run /compact immediately.\n\n"
+            "COMMIT FORMAT (non-negotiable):\n"
+            "Use Farhanfeat/Farhanfix/Farhanupdate/Farhanrefactor/Farhantest/Farhanchore prefix.\n"
+            "Example: `Farhanfeat(api): add shift task endpoint with checklist aggregation`\n"
+            "Body must describe what changed — function names, endpoints, behaviour. No vague messages.\n"
+            "ZERO attribution trailers — no Co-Authored-By, no Claude, no AI tool mentions. Ever."
         ),
         "color": "#4f8ef7",
         "icon": "🛠",
@@ -79,7 +92,16 @@ LANE_DEFAULTS: dict[str, dict] = {
             "You are a DevFleet **Code Reviewer**. Read-only analysis only.\n"
             "Check: naming, patterns, error handling, test coverage, git hygiene.\n"
             "Score each dimension 0-10. Fail anything below 7. Be specific with line numbers.\n"
-            "Use the code-reviewer ECC skill for systematic review."
+            "Use the code-reviewer ECC skill for systematic review.\n\n"
+            "CRITICAL — multi-agent verification rule: NEVER re-read a file to confirm your own "
+            "change looks correct. `Read` returns combined working-tree state including patches "
+            "from other agents that may have already fixed the bug you're reviewing. "
+            "To verify a specific commit, use: `git diff <baseline>..HEAD -- <file>` where "
+            "<baseline> is the parent mission's commit SHA if available, or "
+            "`git merge-base HEAD origin/main` as a fallback. "
+            "Use `git show <commit-sha> -- <file>` to inspect what a commit actually wrote in "
+            "isolation. When two reviewers work overlapping files, each must diff against their "
+            "own baseline, not against HEAD."
         ),
         "color": "#f7a84f",
         "icon": "🔍",
@@ -162,7 +184,7 @@ LANE_DEFAULTS: dict[str, dict] = {
     # ── Researcher (2 slots) — feasibility + sustainability ───────────────────
     "researcher": {
         "max_agents": 2,
-        "default_model": "claude-opus-4-6",
+        "default_model": "claude-opus-4-7",
         "tool_preset": "researcher",
         "append_prompt": (
             "You are a DevFleet **Researcher**. Feasibility and sustainability analysis.\n"
@@ -206,12 +228,12 @@ MISSION_TYPE_TO_LANE: dict[str, str] = {
     "research":     "researcher",
 }
 
-MODEL_CHOICES = ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
+MODEL_CHOICES = ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
 
 
 class DispatchOptions(BaseModel):
     """Per-dispatch overrides for Claude CLI invocation."""
-    model: Optional[str] = None              # claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5-20251001
+    model: Optional[str] = None              # claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5-20251001
     max_turns: Optional[int] = None          # --max-turns N
     max_budget_usd: Optional[float] = None   # --max-budget-usd N
     allowed_tools: Optional[List[str]] = None # --allowedTools list (or preset name)
@@ -230,7 +252,7 @@ class MissionCreate(BaseModel):
     priority: int = 0
     tags: List[str] = []
     # Default dispatch config stored on mission
-    model: str = "claude-opus-4-6"
+    model: str = "claude-sonnet-4-6"
     max_turns: Optional[int] = None
     max_budget_usd: Optional[float] = None
     allowed_tools: Optional[str] = None      # JSON string or preset name

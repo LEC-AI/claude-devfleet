@@ -617,7 +617,7 @@ async def dispatch(mid: str, body: DispatchOptions | None = None):
         last_report = dict(reports[0]) if reports else None
 
         session_id = str(uuid.uuid4())
-        model_used = (body and body.model) or mission.get("model") or "claude-opus-4-6"
+        model_used = (body and body.model) or mission.get("model") or "claude-opus-4-7"
         await conn.execute(
             "INSERT INTO agent_sessions (id, mission_id, model) VALUES (?, ?, ?)",
             (session_id, mid, model_used),

@@ -141,7 +141,7 @@ def _build_sdk_options(
     """Build ClaudeCodeOptions from mission config + dispatch overrides."""
 
     # Model selection: override > mission > default
-    model = "claude-opus-4-6"
+    model = "claude-sonnet-4-6"
     if opts and opts.model:
         model = opts.model
     elif mission.get("model"):
@@ -407,6 +407,9 @@ async def _run_agent(
     # Initialize event buffer
     _event_buffers[session_id] = []
 
+    # Tracks whether the SDK actually started streaming (distinguishes dispatch-layer from agent-layer failures)
+    agent_started = False
+
     try:
         # Load per-project MCP configs from DB
         extra_mcp = await _load_project_mcp_configs(mission.get("project_id", ""))
@@ -418,7 +421,7 @@ async def _run_agent(
             resume_session_id=resume_session_id,
             extra_mcp_servers=extra_mcp or None,
         )
-        model_used = sdk_options.model or "claude-opus-4-6"
+        model_used = sdk_options.model or "claude-sonnet-4-6"
 
         log.info(
             "SDK dispatch session %s for mission '%s' in %s (model: %s, worktree: %s, resume: %s)",
@@ -440,6 +443,7 @@ async def _run_agent(
         # Stream messages from the SDK
         # Wrap in safe iterator to skip unparseable events (e.g. rate_limit_event)
         async for message in _safe_query(prompt=prompt, options=sdk_options):
+            agent_started = True  # SDK yielded at least one message — agent actually spawned
             if isinstance(message, SystemMessage):
                 # Capture session ID for resume capability
                 claude_session_id = message.data.get("session_id", "") or ""
@@ -594,7 +598,8 @@ async def _run_agent(
         _broadcast(session_id, {"type": "done", "status": new_status})
 
     except Exception as e:
-        log.exception("Session %s error: %s", session_id, e)
+        failure_layer = "agent" if agent_started else "dispatch"
+        log.exception("Session %s %s-layer error: %s", session_id, failure_layer, e)
         ended_at = datetime.now(timezone.utc).isoformat()
         full_output = "".join(output_chunks)
         if existing_output:
@@ -612,17 +617,63 @@ async def _run_agent(
                 "UPDATE missions SET status='failed', updated_at=? WHERE id=?",
                 (ended_at, mission["id"]),
             )
+            # Record failure layer for observability and downstream classification
+            await conn.execute(
+                "INSERT INTO mission_events (mission_id, event_type, data, failure_layer) VALUES (?, ?, ?, ?)",
+                (mission["id"], "session_failed",
+                 json.dumps({"session_id": session_id, "error": str(e)[:500]}),
+                 failure_layer),
+            )
             await conn.commit()
+
+            # Dispatch-layer failures are orchestrator bugs, not agent bugs.
+            # Auto-retry once with a short backoff so transient errors (e.g. hot-reload races)
+            # self-heal. Agent-layer failures need code changes — never auto-retry.
+            if failure_layer == "dispatch":
+                prior_failures = await conn.execute(
+                    """SELECT COUNT(*) FROM mission_events
+                       WHERE mission_id=? AND event_type='session_failed'
+                         AND failure_layer='dispatch'
+                         AND created_at >= datetime('now', '-10 minutes')""",
+                    (mission["id"],),
+                )
+                row = await prior_failures.fetchone()
+                prior_count = row[0] if row else 0
+                if prior_count <= 1:
+                    log.warning(
+                        "Mission %s dispatch failure #%d — scheduling auto-retry in 10s",
+                        mission["id"], prior_count,
+                    )
+                    asyncio.create_task(_dispatch_retry(mission["id"], delay=10))
         finally:
             await conn.close()
 
         if worktree_path:
             await cleanup_worktree(project_path, session_id, merge=False)
-        _broadcast(session_id, {"type": "done", "status": "failed", "error": str(e)})
+        _broadcast(session_id, {"type": "done", "status": "failed", "error": str(e),
+                                  "failure_layer": failure_layer})
 
     finally:
         running_tasks.pop(session_id, None)
         _event_buffers.pop(session_id, None)
+
+
+async def _dispatch_retry(mission_id: str, delay: int = 10):
+    """Reset a dispatch-failed mission to 'draft' after a short delay so mission_watcher retries it."""
+    await asyncio.sleep(delay)
+    try:
+        conn = await db.get_db()
+        try:
+            await conn.execute(
+                "UPDATE missions SET status='draft', updated_at=datetime('now') WHERE id=? AND status='failed'",
+                (mission_id,),
+            )
+            await conn.commit()
+            log.info("Mission %s reset to draft for dispatch retry", mission_id)
+        finally:
+            await conn.close()
+    except Exception as err:
+        log.warning("Failed to reset mission %s for retry: %s", mission_id, err)
 
 
 async def dispatch_mission(

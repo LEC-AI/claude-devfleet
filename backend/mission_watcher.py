@@ -53,13 +53,13 @@ async def _find_eligible_missions(limit: int) -> list[dict]:
         await conn.close()
 
 
-async def _emit_event(mission_id: str, event_type: str, source_mission_id: str | None = None, data: dict | None = None):
+async def _emit_event(mission_id: str, event_type: str, source_mission_id: str | None = None, data: dict | None = None, failure_layer: str | None = None):
     """Record a mission event for observability."""
     conn = await db.get_db()
     try:
         await conn.execute(
-            "INSERT INTO mission_events (mission_id, event_type, source_mission_id, data) VALUES (?, ?, ?, ?)",
-            (mission_id, event_type, source_mission_id, json.dumps(data or {})),
+            "INSERT INTO mission_events (mission_id, event_type, source_mission_id, data, failure_layer) VALUES (?, ?, ?, ?, ?)",
+            (mission_id, event_type, source_mission_id, json.dumps(data or {}), failure_layer),
         )
         await conn.commit()
     except Exception as e:
@@ -96,7 +96,7 @@ async def _dispatch_eligible(mission: dict):
         last_report = dict(rows[0]) if rows else None
 
         # Create session
-        model = mission.get("model") or "claude-opus-4-6"
+        model = mission.get("model") or "claude-sonnet-4-6"
         await conn.execute(
             "INSERT INTO agent_sessions (id, mission_id, model) VALUES (?, ?, ?)",
             (session_id, mission_id, model),

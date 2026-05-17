@@ -43,7 +43,7 @@ async def analyze_project_files(
         analysis_prompt = _build_analysis_prompt(project_path, files_to_analyze, custom_prompt)
 
         options = ClaudeCodeOptions(
-            model="claude-opus-4-6",
+            model="claude-opus-4-7",
             permission_mode="bypassPermissions",
             max_turns=1,
             cwd=project_path,
