@@ -598,6 +598,31 @@ async def get_lanes():
     return await lane_snapshot()
 
 
+@app.get("/api/fleet/summary")
+async def fleet_summary():
+    """Fleet health snapshot — total slots, running agents, free slots, and today's cost."""
+    from lanes import total_capacity as lane_total_capacity
+    total_slots = lane_total_capacity()
+    running_agents = sum(1 for t in running_tasks.values() if not t.done())
+    free_slots = max(0, total_slots - running_agents)
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            """SELECT COALESCE(SUM(total_cost_usd), 0) AS cost_today
+               FROM agent_sessions
+               WHERE DATE(started_at) = DATE('now')"""
+        )
+        cost_today_usd = dict(rows[0])["cost_today"] if rows else 0.0
+    finally:
+        await conn.close()
+    return {
+        "total_slots": total_slots,
+        "running_agents": running_agents,
+        "free_slots": free_slots,
+        "cost_today_usd": round(cost_today_usd, 6),
+    }
+
+
 # ──────────────────────────────────────────────
 # Dispatch
 # ──────────────────────────────────────────────
