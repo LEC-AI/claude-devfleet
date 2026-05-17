@@ -76,10 +76,21 @@ export function streamSession(sessionId, { onEvent, onBackfill, onDone, onError 
       } else if (data.type === 'text' || data.type === 'tool' || data.type === 'tool_result') {
         onEvent?.({ type: data.type, text: data.text });
       } else if (data.type === 'usage') {
+        // Structured event for live header update
+        onEvent?.({ type: 'cost_update', cost: data.cost || 0, usage: data.usage, raw: data });
+        // Summary line embedded in output stream
         const cost = data.cost ? `$${data.cost.toFixed(4)}` : '';
-        const tokens = data.usage ? `${data.usage.input_tokens || 0} in / ${data.usage.output_tokens || 0} out` : '';
-        const parts = [tokens, cost].filter(Boolean).join(' | ');
-        if (parts) onEvent?.({ type: 'usage', text: `\n--- ${parts} ---\n` });
+        const u = data.usage || {};
+        const parts = [
+          u.input_tokens != null ? `${u.input_tokens}↑` : '',
+          u.output_tokens != null ? `${u.output_tokens}↓` : '',
+          u.cache_read_tokens > 0 ? `${u.cache_read_tokens} cached` : '',
+          cost,
+        ].filter(Boolean).join(' · ');
+        if (parts) onEvent?.({ type: 'usage', text: `\n─── ${parts} ───\n` });
+      } else if (data.type === 'cost_update') {
+        // Live heartbeat from backend (every ~60s mid-session)
+        onEvent?.({ type: 'cost_update', cost: data.cost || 0, tokens: data.tokens || 0, raw: data });
       }
     } catch (err) {
       console.error('SSE parse error:', err);

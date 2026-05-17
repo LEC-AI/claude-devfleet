@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 
 const MODELS = [
-  { value: 'claude-opus-4-6', label: 'Opus 4.6 (Most capable)', tier: 'high', icon: '\u{1F9E0}', cost: '~$5\u201315/mission', tagline: 'Maximum intelligence' },
+  { value: 'claude-opus-4-7', label: 'Opus 4.7 (Most capable)', tier: 'high', icon: '\u{1F9E0}', cost: '~$5\u201315/mission', tagline: 'Maximum intelligence' },
   { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6 (Fast + capable)', tier: 'mid', icon: '\u26A1', cost: '~$1\u20135/mission', tagline: 'Speed meets smarts' },
   { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5 (Fastest, cheapest)', tier: 'low', icon: '\u{1F680}', cost: '~$0.1\u20131/mission', tagline: 'Blazing fast' },
 ];

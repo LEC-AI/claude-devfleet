@@ -57,6 +57,11 @@ export default function LiveAgent({ sessionId, navigate }) {
               setConfig(evt);
               return;
             }
+            if (evt.type === 'cost_update') {
+              if (evt.cost > 0) setFinalCost(evt.cost);
+              if (evt.tokens > 0) setFinalTokens(evt.tokens);
+              return;
+            }
             setEvents(prev => [...prev, evt]);
           },
           onBackfill: (text) => setEvents([{ type: 'text', text }]),
@@ -195,12 +200,12 @@ export default function LiveAgent({ sessionId, navigate }) {
             )}
             {finalCost > 0 && (
               <span className="text-sm font-mono" style={{ color: 'var(--accent-text)' }}>
-                Cost: ${finalCost.toFixed(4)}
+                {status === 'running' ? '~' : ''}${finalCost.toFixed(4)}
               </span>
             )}
             {finalTokens > 0 && (
               <span className="text-sm font-mono text-muted">
-                {(finalTokens / 1000).toFixed(1)}k tokens
+                {(finalTokens / 1000).toFixed(1)}k tok
               </span>
             )}
           </div>

@@ -40,12 +40,13 @@ echo "  │  orchestrator×3  coder×3  reviewer×2  security×1                
 echo "  │  tester×2  e2e×2  qa×1  dyn-test×1  researcher×2  explorer×1       │"
 echo "  └─────────────────────────────────────────────────────────────────────┘"
 echo ""
-# NOTE: bump when shipping new features
 echo "  ┌─ Recently shipped ──────────────────────────────────────────────────┐"
-echo "  │  1fb6ebc  10-lane fleet, ECC access, safe-merger, auto-compact      │"
-echo "  │  2bb2d81  Lane scheduling + slot accounting + pytest infra          │"
-echo "  │  5161f41  Intelligence module: planner_v2, analyzer, health, costs  │"
-echo "  │  23b683d  Streamable HTTP MCP transport + Integrations page         │"
+git log --oneline -4 2>/dev/null | while IFS= read -r gitline; do
+  sha="${gitline:0:7}"
+  msg="${gitline:8}"
+  if [ ${#msg} -gt 58 ]; then msg="${msg:0:55}..."; fi
+  printf "  │  %s  %-58s│\n" "$sha" "$msg"
+done
 echo "  └─────────────────────────────────────────────────────────────────────┘"
 echo ""
 
