@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any  # kept for type annotations
@@ -55,7 +56,12 @@ _cl.parse_message = _patched_parse
 import db
 from prompt_template import build_prompt
 from worktree import create_worktree, cleanup_worktree
-from models import TOOL_PRESETS, LANE_DEFAULTS, MISSION_TYPE_TO_LANE, DispatchOptions
+from models import TOOL_PRESETS, LANE_DEFAULTS, MISSION_TYPE_TO_LANE, MODEL_CHOICES, DispatchOptions
+
+# Max wallclock time per session before watchdog cancels it (default 90 min)
+_MAX_SESSION_SECONDS = int(os.getenv("DEVFLEET_MAX_SESSION_MINUTES", "90")) * 60
+# How often to flush last_activity_at to DB (seconds) — avoids per-message writes
+_ACTIVITY_FLUSH_INTERVAL = 60
 
 log = logging.getLogger("devfleet.sdk_engine")
 
@@ -140,12 +146,28 @@ def _build_sdk_options(
 ) -> ClaudeCodeOptions:
     """Build ClaudeCodeOptions from mission config + dispatch overrides."""
 
-    # Model selection: override > mission > default
+    # Model selection: override > mission > lane default > hardcoded default
+    # Validate against MODEL_CHOICES to reject stale/retired model names
     model = "claude-sonnet-4-6"
-    if opts and opts.model:
+    if opts and opts.model and opts.model in MODEL_CHOICES:
         model = opts.model
-    elif mission.get("model"):
-        model = mission["model"]
+    elif opts and opts.model:
+        log.warning("Dispatch override model '%s' not in MODEL_CHOICES — using lane default", opts.model)
+
+    if model == "claude-sonnet-4-6":  # not yet overridden
+        stored = mission.get("model", "")
+        if stored and stored in MODEL_CHOICES:
+            model = stored
+        elif stored:
+            # Stale model name (e.g. claude-sonnet-4-20250514, claude-opus-4-6)
+            # Fall through to lane default below
+            log.warning("Mission model '%s' is stale/unknown — resolving from lane default", stored)
+
+        if model == "claude-sonnet-4-6":  # still not resolved — try lane default
+            lane = _derive_lane(mission)
+            lane_model = LANE_DEFAULTS.get(lane, {}).get("default_model", "")
+            if lane_model and lane_model in MODEL_CHOICES:
+                model = lane_model
 
     # Allowed tools: override > preset > mission config > full
     allowed_tools = []
@@ -409,6 +431,23 @@ async def _run_agent(
 
     # Tracks whether the SDK actually started streaming (distinguishes dispatch-layer from agent-layer failures)
     agent_started = False
+    session_timed_out = False
+
+    # Watchdog: cancel this task if agent exceeds the max wallclock limit
+    async def _watchdog():
+        nonlocal session_timed_out
+        await asyncio.sleep(_MAX_SESSION_SECONDS)
+        session_timed_out = True
+        log.warning(
+            "Session %s exceeded %d-minute limit — cancelling (stuck agent or hung subprocess)",
+            session_id, _MAX_SESSION_SECONDS // 60,
+        )
+        current = asyncio.current_task()
+        parent = running_tasks.get(session_id)
+        if parent and parent is not current:
+            parent.cancel()
+
+    watchdog_task = asyncio.create_task(_watchdog())
 
     try:
         # Load per-project MCP configs from DB
@@ -439,11 +478,27 @@ async def _run_agent(
         })
 
         claude_session_id = ""
+        last_activity_flush = time.time()
 
         # Stream messages from the SDK
         # Wrap in safe iterator to skip unparseable events (e.g. rate_limit_event)
         async for message in _safe_query(prompt=prompt, options=sdk_options):
             agent_started = True  # SDK yielded at least one message — agent actually spawned
+
+            # Throttled activity heartbeat — flushes to DB at most once per minute
+            now = time.time()
+            if now - last_activity_flush >= _ACTIVITY_FLUSH_INTERVAL:
+                last_activity_flush = now
+                try:
+                    _conn = await db.get_db()
+                    await _conn.execute(
+                        "UPDATE agent_sessions SET last_activity_at=? WHERE id=?",
+                        (datetime.now(timezone.utc).isoformat(), session_id),
+                    )
+                    await _conn.commit()
+                    await _conn.close()
+                except Exception:
+                    pass
             if isinstance(message, SystemMessage):
                 # Capture session ID for resume capability
                 claude_session_id = message.data.get("session_id", "") or ""
@@ -559,6 +614,7 @@ async def _run_agent(
         if worktree_path:
             await cleanup_worktree(project_path, session_id, merge=True)
 
+        watchdog_task.cancel()
         _broadcast(session_id, {
             "type": "done", "status": "completed", "exit_code": 0,
             "cost": total_cost, "tokens": total_tokens,
@@ -566,15 +622,17 @@ async def _run_agent(
         log.info("Session %s completed (cost $%.4f, tokens %d)", session_id, total_cost, total_tokens)
 
     except asyncio.CancelledError:
+        watchdog_task.cancel()
         is_takeover = session_id in _takeover_sessions
         _takeover_sessions.discard(session_id)
-        log.info("Session %s %s", session_id, "taken over" if is_takeover else "cancelled")
+        cancel_reason = "timed out" if session_timed_out else ("taken over" if is_takeover else "cancelled")
+        log.info("Session %s %s", session_id, cancel_reason)
         ended_at = datetime.now(timezone.utc).isoformat()
         full_output = "".join(output_chunks)
         if existing_output:
             full_output = existing_output + "\n--- RESUMED ---\n" + full_output
 
-        new_status = "takeover" if is_takeover else "cancelled"
+        new_status = "timed_out" if session_timed_out else ("takeover" if is_takeover else "cancelled")
         mission_status = "running" if is_takeover else "failed"
         conn = await db.get_db()
         try:
@@ -598,6 +656,7 @@ async def _run_agent(
         _broadcast(session_id, {"type": "done", "status": new_status})
 
     except Exception as e:
+        watchdog_task.cancel()
         failure_layer = "agent" if agent_started else "dispatch"
         log.exception("Session %s %s-layer error: %s", session_id, failure_layer, e)
         ended_at = datetime.now(timezone.utc).isoformat()

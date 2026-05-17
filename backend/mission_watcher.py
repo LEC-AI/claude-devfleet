@@ -117,14 +117,67 @@ async def _dispatch_eligible(mission: dict):
     running_tasks[session_id] = task
 
 
+async def _reap_stuck_sessions():
+    """Find sessions silent for > STUCK_THRESHOLD and cancel their tasks."""
+    stuck_threshold_minutes = int(os.environ.get("DEVFLEET_STUCK_THRESHOLD_MINUTES", "20"))
+    conn = await db.get_db()
+    try:
+        stuck = await conn.execute_fetchall(
+            """SELECT s.id, s.mission_id FROM agent_sessions s
+               WHERE s.status = 'running'
+                 AND (
+                   s.last_activity_at IS NULL
+                   OR s.last_activity_at < datetime('now', ? || ' minutes')
+                 )
+                 AND s.started_at < datetime('now', '-5 minutes')""",
+            (f"-{stuck_threshold_minutes}",),
+        )
+    finally:
+        await conn.close()
+
+    if not stuck:
+        return
+
+    from sdk_engine import running_tasks
+    for row in stuck:
+        session_id = row["id"]
+        task = running_tasks.get(session_id)
+        if task and not task.done():
+            log.warning(
+                "Session %s has been silent for >%d min — cancelling as stuck",
+                session_id, stuck_threshold_minutes,
+            )
+            task.cancel()
+        elif not task:
+            # No task running but DB says running — orphaned session, mark failed
+            conn2 = await db.get_db()
+            try:
+                now = datetime.now(timezone.utc).isoformat()
+                await conn2.execute(
+                    "UPDATE agent_sessions SET status='failed', ended_at=? WHERE id=?",
+                    (now, session_id),
+                )
+                await conn2.execute(
+                    "UPDATE missions SET status='failed', updated_at=? WHERE id=?",
+                    (now, row["mission_id"]),
+                )
+                await conn2.commit()
+                log.warning("Cleaned up orphaned session %s (no task, DB said running)", session_id)
+            finally:
+                await conn2.close()
+
+
 async def _watch_loop():
-    """Main polling loop — find and dispatch eligible missions."""
+    """Main polling loop — find and dispatch eligible missions, reap stuck sessions."""
     log.info("Mission watcher started (poll every %ds)", POLL_INTERVAL)
 
     while True:
         try:
             # Import here to get current state
             from sdk_engine import running_tasks
+
+            # Reap sessions that have gone silent
+            await _reap_stuck_sessions()
 
             running = sum(1 for t in running_tasks.values() if not t.done())
             slots = MAX_CONCURRENT_AGENTS - running
