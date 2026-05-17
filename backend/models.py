@@ -45,14 +45,14 @@ LANE_DEFAULTS: dict[str, dict] = {
         "default_model": "claude-opus-4-7",
         "tool_preset": "orchestrator",
         "append_prompt": (
-            "BEFORE proposing any DAG parallelism, your FIRST tool calls MUST be "
-            "`mcp__devfleet-tools__list_project_missions` and the DevFleet dashboard read "
-            "(get_dashboard via devfleet-context MCP). Read current fleet shape — slots per lane, "
-            "free capacity — and shape the DAG accordingly. Do NOT assume the default 3-slot fleet. "
-            "The operator may have scaled to 18 slots across 10 lanes "
-            "(orchestrator×3, coder×3, reviewer×2, security×1, tester×2, e2e×2, "
-            "qa×1, dynamic_tester×1, researcher×2, explorer×1). "
-            "Shape parallelism to ACTUAL capacity, not assumed defaults.\n\n"
+            "BEFORE proposing any DAG parallelism, your FIRST tool call MUST be "
+            "`mcp__devfleet-context__get_fleet_shape`. This returns all 10 lanes with their "
+            "max slots, running count, and free slots — the authoritative fleet capacity. "
+            "Shape your DAG to the 'free' count per lane, not assumed defaults. "
+            "The fleet has 18 total slots across 10 lanes: "
+            "orchestrator×3, coder×3, reviewer×2, security×1, tester×2, e2e×2, "
+            "qa×1, dynamic_tester×1, researcher×2, explorer×1. "
+            "Second call: `mcp__devfleet-tools__list_project_missions` to see existing work.\n\n"
             "You are a DevFleet **Orchestrator**. Your role is coordination and planning.\n"
             "Use /prp-plan to produce implementation plans. Then /prompt-optimizer to sharpen them.\n"
             "Break large features into sub-missions via create_sub_mission, assign correct lanes.\n"

@@ -380,12 +380,17 @@ async def _dispatch_mission(args: dict, conn) -> dict:
     if mission["status"] == "running":
         return {"error": "Mission is already running"}
 
-    # Check agent slot availability
+    # Check per-lane capacity first, then global ceiling
+    from lanes import check_slot
     from app import running_tasks, MAX_CONCURRENT_AGENTS
+
+    ok, reason = await check_slot(mission)
+    if not ok:
+        return {"error": f"Dispatch blocked: {reason}"}
 
     running_count = sum(1 for t in running_tasks.values() if not t.done())
     if running_count >= MAX_CONCURRENT_AGENTS:
-        return {"error": f"All {MAX_CONCURRENT_AGENTS} agent slots in use. Wait for one to finish or cancel a running mission."}
+        return {"error": f"Global agent ceiling reached ({running_count}/{MAX_CONCURRENT_AGENTS}). Wait for a slot to free."}
 
     # Get last report for context (matches app.py flow)
     cur = await conn.execute(
@@ -635,9 +640,9 @@ async def _get_dashboard(conn) -> dict:
     )
     mission_stats = {row["status"]: row["cnt"] for row in await cur.fetchall()}
 
-    # Running agents
+    # Running agents (include lane info)
     cur = await conn.execute(
-        "SELECT s.id, s.mission_id, m.title FROM agent_sessions s "
+        "SELECT s.id, s.mission_id, m.title, m.lane, m.mission_type FROM agent_sessions s "
         "JOIN missions m ON s.mission_id = m.id WHERE s.status = 'running'"
     )
     running = [dict(r) for r in await cur.fetchall()]
@@ -651,10 +656,16 @@ async def _get_dashboard(conn) -> dict:
     )
     recent = [dict(r) for r in await cur.fetchall()]
 
+    # Full lane topology — authoritative fleet shape
+    from lanes import snapshot as lane_snapshot, total_capacity
+    lane_data = await lane_snapshot()
+    total_slots = total_capacity()
+
     return {
         "projects": project_count,
         "missions": mission_stats,
         "running_agents": running,
-        "agent_slots": f"{len(running)}/{os.environ.get('DEVFLEET_MAX_AGENTS', '3')}",
+        "agent_slots": f"{len(running)}/{total_slots}",
+        "lanes": lane_data,
         "recent_activity": recent,
     }

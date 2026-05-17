@@ -201,12 +201,34 @@ async def init_db():
             except Exception:
                 pass  # Column already exists
 
-        # Re-sync lane prompts from LANE_DEFAULTS (INSERT OR IGNORE won't update stale rows)
+        # Full re-sync of all lane fields from LANE_DEFAULTS
+        # INSERT OR IGNORE seeds new lanes; UPDATE syncs stale rows (model, slots, prompt)
+        # Also disables lanes no longer in LANE_DEFAULTS (deprecated/renamed lanes)
         from models import LANE_DEFAULTS as _LD
+        await db.execute(
+            f"UPDATE lanes SET enabled=0 WHERE name NOT IN ({','.join('?' for _ in _LD)})",
+            list(_LD.keys()),
+        )
         for _lane_name, _policy in _LD.items():
             await db.execute(
-                "UPDATE lanes SET append_prompt=? WHERE name=?",
-                (_policy["append_prompt"], _lane_name),
+                """INSERT INTO lanes (name, max_agents, default_model, tool_preset, append_prompt, color, icon)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(name) DO UPDATE SET
+                     max_agents    = excluded.max_agents,
+                     default_model = excluded.default_model,
+                     tool_preset   = excluded.tool_preset,
+                     append_prompt = excluded.append_prompt,
+                     color         = excluded.color,
+                     icon          = excluded.icon""",
+                (
+                    _lane_name,
+                    _policy["max_agents"],
+                    _policy["default_model"],
+                    _policy["tool_preset"],
+                    _policy["append_prompt"],
+                    _policy.get("color", "#888888"),
+                    _policy.get("icon", ""),
+                ),
             )
 
         # Backfill mission_number for existing missions that don't have one

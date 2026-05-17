@@ -101,6 +101,19 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["mission_id"],
             },
         ),
+        types.Tool(
+            name="get_fleet_shape",
+            description=(
+                "Returns the full DevFleet lane topology — all 10 lanes with their max agent slots, "
+                "currently running count, free slots, default model, and role icon. "
+                "Call this BEFORE proposing any DAG parallelism so you plan against actual capacity, "
+                "not assumed defaults. The fleet has 18 total slots across 10 specialised lanes."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
     ]
 
 
@@ -119,6 +132,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         mid = arguments["mission_id"]
         limit = arguments.get("limit", 5)
         return await _read_past_reports(mid, limit)
+    elif name == "get_fleet_shape":
+        return await _get_fleet_shape()
     else:
         return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -234,6 +249,33 @@ async def _read_past_reports(mission_id: str, limit: int) -> list[types.TextCont
             "errors_encountered": r.get("errors_encountered", ""),
         })
     return [types.TextContent(type="text", text=json.dumps(results, indent=2))]
+
+
+async def _get_fleet_shape() -> list[types.TextContent]:
+    """Return full lane topology via the DevFleet API."""
+    lanes = await _api_get("/api/lanes")
+    if not lanes:
+        return [types.TextContent(type="text", text="Fleet shape unavailable — DevFleet API not responding")]
+
+    total_slots = sum(l.get("max_agents", 0) for l in lanes)
+    total_free = sum(l.get("free", 0) for l in lanes)
+
+    result = {
+        "total_slots": total_slots,
+        "total_free": total_free,
+        "lanes": [
+            {
+                "name": l["name"],
+                "icon": l.get("icon", ""),
+                "max_agents": l.get("max_agents", 0),
+                "running": l.get("running", 0),
+                "free": l.get("free", 0),
+                "model": l.get("default_model", ""),
+            }
+            for l in lanes
+        ],
+    }
+    return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
 
 async def main():

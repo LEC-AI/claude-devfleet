@@ -588,6 +588,17 @@ async def generate_next_mission(mid: str):
 
 
 # ──────────────────────────────────────────────
+# Lanes
+# ──────────────────────────────────────────────
+
+@app.get("/api/lanes")
+async def get_lanes():
+    """Return live lane topology — all lanes with running/free slot counts."""
+    from lanes import snapshot as lane_snapshot
+    return await lane_snapshot()
+
+
+# ──────────────────────────────────────────────
 # Dispatch
 # ──────────────────────────────────────────────
 
@@ -595,7 +606,7 @@ async def generate_next_mission(mid: str):
 async def dispatch(mid: str, body: DispatchOptions | None = None):
     running_count = sum(1 for t in running_tasks.values() if not t.done())
     if running_count >= MAX_CONCURRENT_AGENTS:
-        raise HTTPException(429, f"Max {MAX_CONCURRENT_AGENTS} concurrent agents — wait for one to finish")
+        raise HTTPException(429, f"Global agent ceiling reached ({running_count}/{MAX_CONCURRENT_AGENTS}) — wait for a slot")
 
     conn = await db.get_db()
     try:
@@ -608,6 +619,12 @@ async def dispatch(mid: str, body: DispatchOptions | None = None):
         mission = dict(rows[0])
         if mission["status"] == "running":
             raise HTTPException(400, "Mission already running")
+
+        # Per-lane capacity check
+        from lanes import check_slot
+        ok, reason = await check_slot(mission)
+        if not ok:
+            raise HTTPException(429, f"Lane full: {reason}")
 
         # Get last report for context
         reports = await conn.execute_fetchall(
@@ -643,7 +660,7 @@ async def resume(mid: str, body: DispatchOptions | None = None):
     """Resume a failed mission from its last Claude session."""
     running_count = sum(1 for t in running_tasks.values() if not t.done())
     if running_count >= MAX_CONCURRENT_AGENTS:
-        raise HTTPException(429, f"Max {MAX_CONCURRENT_AGENTS} concurrent agents — wait for one to finish")
+        raise HTTPException(429, f"Global agent ceiling reached ({running_count}/{MAX_CONCURRENT_AGENTS}) — wait for a slot")
 
     conn = await db.get_db()
     try:

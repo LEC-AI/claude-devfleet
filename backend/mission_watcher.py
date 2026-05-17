@@ -27,11 +27,11 @@ POLL_INTERVAL = int(os.environ.get("DEVFLEET_WATCHER_INTERVAL", "5"))
 MAX_CONCURRENT_AGENTS = int(os.environ.get("DEVFLEET_MAX_AGENTS", "3"))
 
 
-async def _find_eligible_missions(limit: int) -> list[dict]:
-    """Find auto_dispatch missions whose dependencies are all completed."""
+async def _find_eligible_missions(lane_capacity: dict[str, int]) -> list[dict]:
+    """Find auto_dispatch missions whose dependencies are all completed and whose target lane has capacity."""
+    from lanes import derive_lane
     conn = await db.get_db()
     try:
-        # SQLite json_each lets us check each dependency ID is completed
         rows = await conn.execute_fetchall(
             """SELECT m.*, p.path AS project_path, p.name AS project_name
                FROM missions m
@@ -45,10 +45,18 @@ async def _find_eligible_missions(limit: int) -> list[dict]:
                    )
                  )
                ORDER BY m.priority DESC, m.created_at ASC
-               LIMIT ?""",
-            (limit,),
+               LIMIT 50""",
         )
-        return [dict(r) for r in rows]
+        # Post-filter: only return missions whose target lane has free slots
+        eligible = []
+        for row in rows:
+            m = dict(row)
+            target_lane = derive_lane(m)
+            if lane_capacity.get(target_lane, 0) > 0:
+                eligible.append(m)
+                # Decrement optimistically so we don't dispatch two missions to the same full lane
+                lane_capacity[target_lane] -= 1
+        return eligible
     finally:
         await conn.close()
 
@@ -175,21 +183,26 @@ async def _watch_loop():
         try:
             # Import here to get current state
             from sdk_engine import running_tasks
+            from lanes import free_slots as lane_free_slots
 
             # Reap sessions that have gone silent
             await _reap_stuck_sessions()
 
+            # Global ceiling check (safety override)
             running = sum(1 for t in running_tasks.values() if not t.done())
-            slots = MAX_CONCURRENT_AGENTS - running
-
-            if slots > 0:
-                eligible = await _find_eligible_missions(limit=slots)
-                for mission in eligible:
-                    try:
-                        await _dispatch_eligible(mission)
-                    except Exception as e:
-                        log.error("Failed to auto-dispatch mission %s: %s", mission["id"], e)
-                        await _emit_event(mission["id"], "dispatch_failed", data={"error": str(e)})
+            if running >= MAX_CONCURRENT_AGENTS:
+                pass  # global cap hit — skip dispatch this cycle
+            else:
+                # Per-lane capacity — only dispatch to lanes with free slots
+                lane_capacity = await lane_free_slots()
+                if lane_capacity:
+                    eligible = await _find_eligible_missions(lane_capacity)
+                    for mission in eligible:
+                        try:
+                            await _dispatch_eligible(mission)
+                        except Exception as e:
+                            log.error("Failed to auto-dispatch mission %s: %s", mission["id"], e)
+                            await _emit_event(mission["id"], "dispatch_failed", data={"error": str(e)})
 
         except asyncio.CancelledError:
             raise

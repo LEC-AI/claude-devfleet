@@ -112,8 +112,13 @@ async def list_tools() -> list[types.Tool]:
                     "acceptance_criteria": {"type": "string", "description": "What defines done"},
                     "mission_type": {
                         "type": "string",
-                        "enum": ["implement", "review", "test", "fix", "explore"],
-                        "description": "Type of mission (default: implement)",
+                        "enum": ["implement", "review", "test", "fix", "explore", "security", "e2e", "qa", "research", "planner"],
+                        "description": "Type of mission — determines which lane it runs in (default: implement → coder lane)",
+                    },
+                    "lane": {
+                        "type": "string",
+                        "enum": ["coder", "reviewer", "tester", "e2e", "security", "qa", "dynamic_tester", "researcher", "explorer", "orchestrator"],
+                        "description": "Override the lane directly. If omitted, derived from mission_type. Use get_fleet_shape to check which lanes have free slots before dispatching.",
                     },
                     "priority": {"type": "integer", "description": "Priority 0-5 (default: 2)"},
                     "wait_for_me": {
@@ -204,26 +209,59 @@ async def _create_sub_mission(args: dict) -> list[types.TextContent]:
     if not PROJECT_ID:
         return [types.TextContent(type="text", text="Cannot create sub-mission: no project context")]
 
+    mission_type = args.get("mission_type", "implement")
+    lane = args.get("lane")
+
+    # Pre-check lane capacity before creating the mission
+    capacity = await _api_get("/api/lanes")
+    if capacity:
+        from_lanes = {l["name"]: l for l in capacity}
+        # Resolve target lane (explicit override > mission_type mapping)
+        target_lane = lane
+        if not target_lane:
+            type_to_lane = {
+                "implement": "coder", "fix": "coder", "full": "coder",
+                "review": "reviewer", "security": "security", "test": "tester",
+                "e2e": "e2e", "qa": "qa", "research": "researcher",
+                "planner": "orchestrator", "orchestrator": "orchestrator", "explore": "explorer",
+            }
+            target_lane = type_to_lane.get(mission_type, "coder")
+
+        lane_info = from_lanes.get(target_lane)
+        if lane_info and lane_info.get("free", 0) == 0:
+            # Suggest alternatives
+            free_lanes = [l["name"] for l in capacity if l.get("free", 0) > 0]
+            return [types.TextContent(type="text", text=(
+                f"Lane '{target_lane}' is full ({lane_info['running']}/{lane_info['max_agents']} slots used). "
+                f"Free lanes: {', '.join(free_lanes) or 'none'}. "
+                f"Use get_fleet_shape to see current capacity."
+            ))]
+
     wait_for_me = args.get("wait_for_me", False)
     depends_on = [MISSION_ID] if (wait_for_me and MISSION_ID) else []
 
-    result = await _api_post("/api/missions", {
+    payload = {
         "project_id": PROJECT_ID,
         "title": args["title"],
         "detailed_prompt": args["detailed_prompt"],
         "acceptance_criteria": args.get("acceptance_criteria", ""),
-        "mission_type": args.get("mission_type", "implement"),
+        "mission_type": mission_type,
         "priority": args.get("priority", 2),
         "tags": ["sub-mission"],
         "parent_mission_id": MISSION_ID or None,
         "depends_on": depends_on,
         "auto_dispatch": True,
-    })
+    }
+    if lane:
+        payload["lane"] = lane
+
+    result = await _api_post("/api/missions", payload)
 
     if result:
         dispatch_note = "Will start after your mission completes." if wait_for_me else "Auto-dispatching to another agent now."
+        target = result.get("lane") or result.get("mission_type", "")
         return [types.TextContent(type="text",
-            text=f"Sub-mission created: {result['id']}\nTitle: {result['title']}\nStatus: {result['status']}\n{dispatch_note}")]
+            text=f"Sub-mission created: {result['id']}\nTitle: {result['title']}\nLane: {target}\nStatus: {result['status']}\n{dispatch_note}")]
     return [types.TextContent(type="text", text="Failed to create sub-mission")]
 
 
@@ -273,6 +311,7 @@ async def _get_sub_mission_status(args: dict) -> list[types.TextContent]:
             "title": m["title"],
             "status": m["status"],
             "type": m.get("mission_type", ""),
+            "lane": m.get("lane") or "",
         }
         for m in data
         if m.get("parent_mission_id") == MISSION_ID
@@ -298,7 +337,8 @@ async def _list_project_missions(args: dict) -> list[types.TextContent]:
 
     missions = [
         {"id": m["id"], "title": m["title"], "status": m["status"],
-         "type": m.get("mission_type", ""), "priority": m.get("priority", 0)}
+         "type": m.get("mission_type", ""), "lane": m.get("lane") or "",
+         "priority": m.get("priority", 0)}
         for m in data[:20]
     ]
     return [types.TextContent(type="text", text=json.dumps(missions, indent=2))]
