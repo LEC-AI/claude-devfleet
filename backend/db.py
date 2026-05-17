@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     remote_url TEXT DEFAULT '',
     total_cost_usd REAL DEFAULT 0,
     total_tokens INTEGER DEFAULT 0,
+    cache_read_tokens INTEGER DEFAULT 0,
+    cache_creation_tokens INTEGER DEFAULT 0,
     last_activity_at TEXT
 );
 
@@ -188,8 +190,10 @@ async def init_db():
             "ALTER TABLE missions ADD COLUMN lane TEXT DEFAULT 'coder'",
             # v5: failure layer classification (dispatch vs agent)
             "ALTER TABLE mission_events ADD COLUMN failure_layer TEXT",
-            # v6: activity heartbeat for stuck-session detection
+            # v6: activity heartbeat + accurate cost tracking
             "ALTER TABLE agent_sessions ADD COLUMN last_activity_at TEXT",
+            "ALTER TABLE agent_sessions ADD COLUMN cache_read_tokens INTEGER DEFAULT 0",
+            "ALTER TABLE agent_sessions ADD COLUMN cache_creation_tokens INTEGER DEFAULT 0",
         ]
         for migration in migrations:
             try:

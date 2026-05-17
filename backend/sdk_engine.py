@@ -425,6 +425,11 @@ async def _run_agent(
     output_chunks = []
     total_cost = existing_cost
     total_tokens = existing_tokens
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_cache_read_tokens = 0
+    total_cache_creation_tokens = 0
+    last_cost_flush = time.time()
 
     # Initialize event buffer
     _event_buffers[session_id] = []
@@ -485,18 +490,24 @@ async def _run_agent(
         async for message in _safe_query(prompt=prompt, options=sdk_options):
             agent_started = True  # SDK yielded at least one message — agent actually spawned
 
-            # Throttled activity heartbeat — flushes to DB at most once per minute
+            # Throttled heartbeat — flushes activity timestamp + running cost to DB once per minute
             now = time.time()
             if now - last_activity_flush >= _ACTIVITY_FLUSH_INTERVAL:
                 last_activity_flush = now
                 try:
                     _conn = await db.get_db()
                     await _conn.execute(
-                        "UPDATE agent_sessions SET last_activity_at=? WHERE id=?",
-                        (datetime.now(timezone.utc).isoformat(), session_id),
+                        """UPDATE agent_sessions
+                           SET last_activity_at=?, total_cost_usd=?, total_tokens=?
+                           WHERE id=?""",
+                        (datetime.now(timezone.utc).isoformat(),
+                         total_cost, total_tokens, session_id),
                     )
                     await _conn.commit()
                     await _conn.close()
+                    # Broadcast live cost update to frontend
+                    if total_cost > 0:
+                        _broadcast(session_id, {"type": "cost_update", "cost": total_cost, "tokens": total_tokens})
                 except Exception:
                     pass
             if isinstance(message, SystemMessage):
@@ -538,23 +549,42 @@ async def _run_agent(
                         output_chunks.append(result_text)
                         _broadcast(session_id, {"type": "text", "text": "\n" + result_text})
 
-                # Extract cost and usage — ResultMessage has direct attrs
-                usage = message.usage  # dict or None
-                cost = message.total_cost_usd  # float or None
-                input_t = 0
-                output_t = 0
-                if usage and isinstance(usage, dict):
-                    input_t = usage.get("input_tokens", 0) or 0
-                    output_t = usage.get("output_tokens", 0) or 0
-                    total_tokens = existing_tokens + input_t + output_t
-                if cost:
-                    total_cost = existing_cost + cost
-                if cost or usage:
-                    _broadcast(session_id, {
-                        "type": "usage",
-                        "usage": {"input_tokens": input_t, "output_tokens": output_t},
-                        "cost": total_cost,
-                    })
+                # Extract usage — SDK returns Usage object or dict; handle both
+                usage = message.usage
+                cost = message.total_cost_usd or 0.0
+
+                def _get(obj, key, default=0):
+                    if obj is None:
+                        return default
+                    if isinstance(obj, dict):
+                        return obj.get(key, default) or default
+                    return getattr(obj, key, default) or default
+
+                input_t = _get(usage, "input_tokens")
+                output_t = _get(usage, "output_tokens")
+                cache_read_t = _get(usage, "cache_read_input_tokens")
+                cache_create_t = _get(usage, "cache_creation_input_tokens")
+
+                # Effective tokens: cache reads cost ~10% of normal input — track separately
+                # total_tokens = non-cached input + output (cache handled via dedicated cols)
+                billable_input = input_t - cache_read_t
+                total_input_tokens = existing_tokens + billable_input
+                total_output_tokens += output_t
+                total_cache_read_tokens += cache_read_t
+                total_cache_creation_tokens += cache_create_t
+                total_tokens = total_input_tokens + total_output_tokens
+                total_cost = existing_cost + cost
+
+                _broadcast(session_id, {
+                    "type": "usage",
+                    "usage": {
+                        "input_tokens": billable_input,
+                        "output_tokens": output_t,
+                        "cache_read_tokens": cache_read_t,
+                        "cache_creation_tokens": cache_create_t,
+                    },
+                    "cost": total_cost,
+                })
 
         # Agent finished successfully
         full_output = "".join(output_chunks)
@@ -573,9 +603,11 @@ async def _run_agent(
             await conn.execute(
                 """UPDATE agent_sessions
                    SET status='completed', ended_at=?, exit_code=0, output_log=?,
-                       total_cost_usd=?, total_tokens=?
+                       total_cost_usd=?, total_tokens=?,
+                       cache_read_tokens=?, cache_creation_tokens=?
                    WHERE id=?""",
-                (ended_at, full_output, total_cost, total_tokens, session_id),
+                (ended_at, full_output, total_cost, total_tokens,
+                 total_cache_read_tokens, total_cache_creation_tokens, session_id),
             )
             await conn.execute(
                 "UPDATE missions SET status='completed', updated_at=? WHERE id=?",
@@ -638,9 +670,11 @@ async def _run_agent(
         try:
             await conn.execute(
                 """UPDATE agent_sessions SET status=?, ended_at=?, output_log=?,
-                       total_cost_usd=?, total_tokens=?
+                       total_cost_usd=?, total_tokens=?,
+                       cache_read_tokens=?, cache_creation_tokens=?
                    WHERE id=?""",
-                (new_status, ended_at, full_output, total_cost, total_tokens, session_id),
+                (new_status, ended_at, full_output, total_cost, total_tokens,
+                 total_cache_read_tokens, total_cache_creation_tokens, session_id),
             )
             await conn.execute(
                 "UPDATE missions SET status=?, updated_at=? WHERE id=?",
@@ -668,9 +702,11 @@ async def _run_agent(
         try:
             await conn.execute(
                 """UPDATE agent_sessions SET status='failed', ended_at=?, output_log=?, error_log=?,
-                       total_cost_usd=?, total_tokens=?
+                       total_cost_usd=?, total_tokens=?,
+                       cache_read_tokens=?, cache_creation_tokens=?
                    WHERE id=?""",
-                (ended_at, full_output, str(e), total_cost, total_tokens, session_id),
+                (ended_at, full_output, str(e), total_cost, total_tokens,
+                 total_cache_read_tokens, total_cache_creation_tokens, session_id),
             )
             await conn.execute(
                 "UPDATE missions SET status='failed', updated_at=? WHERE id=?",
