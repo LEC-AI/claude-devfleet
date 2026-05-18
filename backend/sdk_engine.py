@@ -566,14 +566,14 @@ async def _run_agent(
                 cache_read_t = _get(usage, "cache_read_input_tokens")
                 cache_create_t = _get(usage, "cache_creation_input_tokens")
 
-                # Effective tokens: cache reads cost ~10% of normal input — track separately
-                # total_tokens = non-cached input + output (cache handled via dedicated cols)
-                billable_input = input_t - cache_read_t
-                total_input_tokens = existing_tokens + billable_input
+                # SDK input_tokens is already non-cached input only.
+                # cache_read_input_tokens and cache_creation_input_tokens are tracked separately.
+                # total_tokens = input + output (display); cache cols hold full cache breakdown.
+                total_input_tokens += input_t
                 total_output_tokens += output_t
                 total_cache_read_tokens += cache_read_t
                 total_cache_creation_tokens += cache_create_t
-                total_tokens = total_input_tokens + total_output_tokens
+                total_tokens = existing_tokens + total_input_tokens + total_output_tokens
                 total_cost = existing_cost + cost
 
                 _broadcast(session_id, {
