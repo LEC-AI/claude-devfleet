@@ -369,15 +369,18 @@ async def create_mission(body: MissionCreate):
             (body.project_id,),
         )
         next_num = num_rows[0][0] if num_rows else 1
+        # Derive lane from mission_type if not explicitly provided
+        from models import MISSION_TYPE_TO_LANE
+        lane = body.lane or MISSION_TYPE_TO_LANE.get(body.mission_type, "coder")
         await conn.execute(
             """INSERT INTO missions (id, project_id, title, detailed_prompt, acceptance_criteria,
                priority, tags, model, max_turns, max_budget_usd, allowed_tools, mission_type,
-               parent_mission_id, depends_on, auto_dispatch, schedule_cron, schedule_enabled, mission_number)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               lane, parent_mission_id, depends_on, auto_dispatch, schedule_cron, schedule_enabled, mission_number)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (mid, body.project_id, body.title, body.detailed_prompt,
              body.acceptance_criteria, body.priority, json.dumps(body.tags),
              body.model, body.max_turns, body.max_budget_usd,
-             body.allowed_tools or "", body.mission_type,
+             body.allowed_tools or "", body.mission_type, lane,
              body.parent_mission_id, json.dumps(body.depends_on),
              1 if body.auto_dispatch else 0, body.schedule_cron, schedule_enabled, next_num),
         )
