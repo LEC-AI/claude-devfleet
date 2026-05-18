@@ -87,6 +87,10 @@ cd frontend
 npm install --silent 2>/dev/null
 cd ..
 
+# Clear any zombie processes holding the ports before starting
+lsof -ti :18801 | xargs kill -9 2>/dev/null || true
+lsof -ti :3100  | xargs kill -9 2>/dev/null || true
+
 # Start backend (in venv)
 echo "  Starting Farhan's DevFleet™ API on port 18801..."
 cd backend
