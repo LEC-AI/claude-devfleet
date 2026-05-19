@@ -75,6 +75,31 @@ def reverse_path(path: str) -> str:
 @asynccontextmanager
 async def lifespan(app):
     await db.init_db()
+    # Sweep for sessions left running by a previous SIGKILL — mark interrupted so UI is accurate
+    # Sessions with claude_session_id can be resumed via POST /api/missions/{id}/resume
+    conn = await db.get_db()
+    try:
+        # Collect orphaned mission IDs BEFORE updating sessions (subquery must run first)
+        orphaned = await conn.execute_fetchall(
+            "SELECT DISTINCT mission_id FROM agent_sessions WHERE status='running'"
+        )
+        orphan_mission_ids = [r["mission_id"] for r in orphaned]
+        if orphan_mission_ids:
+            await conn.execute(
+                "UPDATE agent_sessions SET status='interrupted', ended_at=datetime('now'), "
+                "error_log='Process interrupted (restart/SIGKILL) — resume via POST /api/missions/{id}/resume' "
+                "WHERE status='running'"
+            )
+            placeholders = ",".join("?" * len(orphan_mission_ids))
+            await conn.execute(
+                f"UPDATE missions SET status='interrupted', updated_at=datetime('now') "
+                f"WHERE status='running' AND id IN ({placeholders})",
+                orphan_mission_ids,
+            )
+            await conn.commit()
+            log.warning("Startup sweep: marked %d orphaned session(s) as interrupted (resumable)", len(orphan_mission_ids))
+    finally:
+        await conn.close()
     await health_checker.start_checker()
     await mission_watcher.start_watcher()
     await scheduler.start_scheduler()
@@ -101,7 +126,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MAX_CONCURRENT_AGENTS = int(os.environ.get("DEVFLEET_MAX_AGENTS", "3"))
+MAX_CONCURRENT_AGENTS = int(os.environ.get("DEVFLEET_MAX_AGENTS", "0"))  # 0 = defer to lane system
 
 
 # ──────────────────────────────────────────────
@@ -601,6 +626,27 @@ async def get_lanes():
     return await lane_snapshot()
 
 
+@app.get("/api/lanes/{name}")
+async def get_lane(name: str):
+    from lanes import get_one_lane
+    lane = await get_one_lane(name)
+    if not lane:
+        raise HTTPException(404, f"Lane '{name}' not found")
+    return lane
+
+
+@app.put("/api/lanes/{name}")
+async def update_lane_endpoint(name: str, body: dict):
+    from lanes import update_lane, get_one_lane
+    existing = await get_one_lane(name)
+    if not existing:
+        raise HTTPException(404, f"Lane '{name}' not found")
+    allowed = {"max_agents", "default_model", "tool_preset", "append_prompt", "color", "icon", "enabled"}
+    patch = {k: v for k, v in body.items() if k in allowed}
+    updated = await update_lane(name, patch)
+    return updated
+
+
 @app.get("/api/fleet/summary")
 async def fleet_summary():
     """Fleet health snapshot — total slots, running agents, free slots, and today's cost."""
@@ -633,7 +679,7 @@ async def fleet_summary():
 @app.post("/api/missions/{mid}/dispatch")
 async def dispatch(mid: str, body: DispatchOptions | None = None):
     running_count = sum(1 for t in running_tasks.values() if not t.done())
-    if running_count >= MAX_CONCURRENT_AGENTS:
+    if MAX_CONCURRENT_AGENTS > 0 and running_count >= MAX_CONCURRENT_AGENTS:
         raise HTTPException(429, f"Global agent ceiling reached ({running_count}/{MAX_CONCURRENT_AGENTS}) — wait for a slot")
 
     conn = await db.get_db()
@@ -687,7 +733,7 @@ async def dispatch(mid: str, body: DispatchOptions | None = None):
 async def resume(mid: str, body: DispatchOptions | None = None):
     """Resume a failed mission from its last Claude session."""
     running_count = sum(1 for t in running_tasks.values() if not t.done())
-    if running_count >= MAX_CONCURRENT_AGENTS:
+    if MAX_CONCURRENT_AGENTS > 0 and running_count >= MAX_CONCURRENT_AGENTS:
         raise HTTPException(429, f"Global agent ceiling reached ({running_count}/{MAX_CONCURRENT_AGENTS}) — wait for a slot")
 
     conn = await db.get_db()

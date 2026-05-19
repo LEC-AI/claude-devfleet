@@ -9,6 +9,7 @@ import Reports from './pages/Reports';
 import StatusPage from './pages/StatusPage';
 import ProjectDetail from './pages/ProjectDetail';
 import Integrations from './pages/Integrations';
+import FleetConfig from './pages/FleetConfig';
 
 function App() {
   const [page, setPage] = useState('dashboard');
@@ -39,6 +40,8 @@ function App() {
         return <Integrations navigate={navigate} />;
       case 'status':
         return <StatusPage navigate={navigate} />;
+      case 'fleet-config':
+        return <FleetConfig navigate={navigate} />;
       default:
         return <Dashboard navigate={navigate} />;
     }

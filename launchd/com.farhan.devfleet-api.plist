@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.farhan.devfleet-api</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/moofasa/claude-devfleet/backend/.venv/bin/python3</string>
+        <string>-m</string>
+        <string>uvicorn</string>
+        <string>app:app</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>18801</string>
+        <string>--reload</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/moofasa/claude-devfleet/backend</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/moofasa/claude-devfleet/backend/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/moofasa</string>
+    </dict>
+
+    <!-- Restart automatically on any exit (crash, SIGKILL, OOM) -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Wait 3s before respawn to avoid tight restart loops -->
+    <key>ThrottleInterval</key>
+    <integer>3</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/moofasa/claude-devfleet/data/logs/api.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/moofasa/claude-devfleet/data/logs/api-error.log</string>
+
+    <!-- Run as the current user (loaded via launchctl bootstrap gui/) -->
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
