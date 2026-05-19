@@ -29,7 +29,7 @@ from claude_code_sdk import (
     ResultMessage,
 )
 from claude_code_sdk.types import TextBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock
-from claude_code_sdk._errors import MessageParseError
+from claude_code_sdk._errors import MessageParseError, ProcessError
 
 # Monkey-patch the SDK's parse_message to skip rate_limit_event instead of throwing.
 # The SDK raises MessageParseError on unknown types, which kills the subprocess
@@ -73,11 +73,35 @@ _event_buffers: dict[str, list[dict]] = {}
 _takeover_sessions: set[str] = {}
 
 # ── Lane helpers (lightweight; full accounting lives in lanes.py) ──
-# Pre-build prompt cache from LANE_DEFAULTS so _build_sdk_options has O(1) lookup
-_LANE_PROMPT_CACHE: dict[str, str] = {
-    name: policy["append_prompt"]
-    for name, policy in LANE_DEFAULTS.items()
-}
+# TTL-cached async DB lookup — DB is source of truth for lane prompts after Prompt Studio edits.
+# Falls back to LANE_DEFAULTS if the DB is unavailable.
+_LANE_PROMPT_CACHE: dict[str, tuple[str, float]] = {}  # name → (text, expires_at)
+_LANE_PROMPT_TTL = 60  # seconds
+
+
+async def _get_lane_prompt_text(lane_name: str) -> str:
+    """Fetch the assembled lane prompt text from DB (TTL-cached 60s). Falls back to LANE_DEFAULTS."""
+    import time as _t
+    cached = _LANE_PROMPT_CACHE.get(lane_name)
+    if cached and cached[1] > _t.monotonic():
+        return cached[0]
+    try:
+        conn = await db.get_db()
+        try:
+            row = await (await conn.execute(
+                "SELECT append_prompt FROM lanes WHERE name = ?", (lane_name,)
+            )).fetchone()
+        finally:
+            await conn.close()
+        if row and row[0]:
+            from lanes import parse_prompt_json, assemble_prompt_text
+            text = assemble_prompt_text(parse_prompt_json(row[0]))
+        else:
+            text = LANE_DEFAULTS.get(lane_name, {}).get("append_prompt", "")
+    except Exception:
+        text = LANE_DEFAULTS.get(lane_name, {}).get("append_prompt", "")
+    _LANE_PROMPT_CACHE[lane_name] = (text, _t.monotonic() + _LANE_PROMPT_TTL)
+    return text
 
 
 def _derive_lane(mission: dict) -> str:
@@ -135,7 +159,7 @@ def _read_report_file(session_id: str) -> dict | None:
     return None
 
 
-def _build_sdk_options(
+async def _build_sdk_options(
     mission: dict,
     opts: DispatchOptions | None,
     work_dir: str,
@@ -187,8 +211,9 @@ def _build_sdk_options(
     elif mission.get("mission_type") and mission["mission_type"] in TOOL_PRESETS:
         allowed_tools = TOOL_PRESETS[mission["mission_type"]]
 
-    # Allow DevFleet MCP tools
-    allowed_tools.extend([
+    # Allow DevFleet MCP tools (full default set; filtered below by lane_mcp_tools)
+    lane_name = _derive_lane(mission)
+    _all_devfleet_tools = [
         "mcp__devfleet-context__get_mission_context",
         "mcp__devfleet-context__get_project_context",
         "mcp__devfleet-context__get_session_history",
@@ -199,12 +224,31 @@ def _build_sdk_options(
         "mcp__devfleet-tools__request_review",
         "mcp__devfleet-tools__get_sub_mission_status",
         "mcp__devfleet-tools__list_project_missions",
-    ])
+    ]
+    allowed_tools.extend(_all_devfleet_tools)
 
-    # System prompt: lane policy → mission override → per-dispatch override
-    # Also inject auto-compact instruction (verified: no native SDK setting for this)
-    lane_name = _derive_lane(mission)
-    lane_prompt = _LANE_PROMPT_CACHE.get(lane_name, "")
+    # Filter MCP tools based on per-lane lane_mcp_tools DB settings
+    _tool_hints: list[str] = []
+    try:
+        from lanes import get_lane_mcp_tools as _get_mcp_tools
+        mcp_tool_rows = await _get_mcp_tools(lane_name)
+        if mcp_tool_rows:
+            disabled = {
+                f"mcp__{r['server_name']}__{r['tool_name']}"
+                for r in mcp_tool_rows if not r["enabled"]
+            }
+            if disabled:
+                allowed_tools = [t for t in allowed_tools if t not in disabled]
+            _tool_hints = [
+                f"- {r['server_name']}/{r['tool_name']}: {r['trigger_hint']}"
+                for r in mcp_tool_rows
+                if r.get("trigger_hint") and r["trigger_hint"] != "always" and r["enabled"]
+            ]
+    except Exception as _mcp_err:
+        log.debug("MCP tool filtering skipped: %s", _mcp_err)
+
+    # System prompt: lane policy (DB) → dispatch override → compact instruction
+    lane_prompt = await _get_lane_prompt_text(lane_name)
     compact_instruction = (
         "\n\nCONTEXT MANAGEMENT: When your context window approaches 199,000 tokens, "
         "immediately run /compact before continuing. Do not wait for it to fill completely."
@@ -215,6 +259,10 @@ def _build_sdk_options(
         append_prompt = lane_prompt + compact_instruction
     else:
         append_prompt = compact_instruction.strip()
+
+    # Inject MCP tool usage hints into the system prompt
+    if _tool_hints:
+        append_prompt += "\n\nMCP Tool Usage Guidelines:\n" + "\n".join(_tool_hints)
 
     # Max turns: worktree missions default to 200 (high complexity tolerance)
     max_turns = None
@@ -459,7 +507,7 @@ async def _run_agent(
         # Load per-project MCP configs from DB
         extra_mcp = await _load_project_mcp_configs(mission.get("project_id", ""))
 
-        sdk_options = _build_sdk_options(
+        sdk_options = await _build_sdk_options(
             mission, opts, work_dir,
             project_path=project_path,
             session_id=session_id,
@@ -693,7 +741,15 @@ async def _run_agent(
     except Exception as e:
         watchdog_task.cancel()
         failure_layer = "agent" if agent_started else "dispatch"
-        log.exception("Session %s %s-layer error: %s", session_id, failure_layer, e)
+        # Detect OOM kills: SIGKILL from the OS surfaces as ProcessError with exit_code=-9
+        oom_killed = isinstance(e, ProcessError) and getattr(e, "exit_code", None) == -9
+        if oom_killed:
+            log.error(
+                "Session %s OOM-killed (SIGKILL, exit -9) — agent process killed by OS memory pressure",
+                session_id,
+            )
+        else:
+            log.exception("Session %s %s-layer error: %s", session_id, failure_layer, e)
         ended_at = datetime.now(timezone.utc).isoformat()
         full_output = "".join(output_chunks)
         if existing_output:
@@ -717,7 +773,8 @@ async def _run_agent(
             await conn.execute(
                 "INSERT INTO mission_events (mission_id, event_type, data, failure_layer) VALUES (?, ?, ?, ?)",
                 (mission["id"], "session_failed",
-                 json.dumps({"session_id": session_id, "error": str(e)[:500]}),
+                 json.dumps({"session_id": session_id, "error": str(e)[:500],
+                             "oom_killed": oom_killed}),
                  failure_layer),
             )
             await conn.commit()

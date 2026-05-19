@@ -127,7 +127,7 @@ async def _dispatch_eligible(mission: dict):
 
 async def _reap_stuck_sessions():
     """Find sessions silent for > STUCK_THRESHOLD and cancel their tasks."""
-    stuck_threshold_minutes = int(os.environ.get("DEVFLEET_STUCK_THRESHOLD_MINUTES", "20"))
+    stuck_threshold_minutes = int(os.environ.get("DEVFLEET_STUCK_THRESHOLD_MINUTES", "5"))
     conn = await db.get_db()
     try:
         stuck = await conn.execute_fetchall(

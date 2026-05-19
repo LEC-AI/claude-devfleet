@@ -18,12 +18,17 @@ import shutil
 log = logging.getLogger("devfleet.worktree")
 
 
-async def _run(cmd: list[str], cwd: str) -> tuple[int, str, str]:
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, cwd=cwd,
+async def _run(
+    cmd: list[str], cwd: str, env: dict[str, str] | None = None
+) -> tuple[int, str, str]:
+    kwargs = dict(
+        cwd=cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    if env is not None:
+        kwargs["env"] = env
+    proc = await asyncio.create_subprocess_exec(*cmd, **kwargs)
     stdout, stderr = await proc.communicate()
     return proc.returncode, stdout.decode().strip(), stderr.decode().strip()
 
@@ -65,6 +70,21 @@ async def create_worktree(
         return None, None
 
     log.info("Created worktree at %s on branch %s", worktree_path, branch_name)
+
+    # Pre-warm node_modules so the agent doesn't OOM during install inside the session.
+    # pnpm install runs here (pre-agent) where a failure is cheap and clearly scoped.
+    lock_file = os.path.join(worktree_path, "pnpm-lock.yaml")
+    if os.path.exists(lock_file):
+        pnpm_cmd = shutil.which("pnpm") or "pnpm"
+        pnpm_env = {**os.environ, "NODE_OPTIONS": "--max-old-space-size=3072"}
+        log.info("Pre-warming pnpm install in worktree %s…", worktree_path)
+        pw_code, _, pw_err = await _run(
+            [pnpm_cmd, "install", "--frozen-lockfile", "--prefer-offline"],
+            worktree_path,
+            env=pnpm_env,
+        )
+        if pw_code != 0:
+            log.warning("pnpm pre-warm failed (exit %d): %s — agent will proceed anyway", pw_code, pw_err[:300])
 
     # Add .devfleet-worktrees to .gitignore if not already there
     gitignore_path = os.path.join(project_path, ".gitignore")
