@@ -9,7 +9,11 @@ mkdir -p "$AGENTS_DIR"
 
 stop_old() {
     local label="$1"
-    launchctl list "$label" &>/dev/null && launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+    if launchctl list "$label" &>/dev/null; then
+        launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+        # Give launchd a moment to settle after bootout before re-bootstrapping
+        sleep 1
+    fi
 }
 
 install_plist() {
@@ -18,7 +22,11 @@ install_plist() {
     label=$(basename "$plist" .plist)
     stop_old "$label"
     cp "$plist" "$AGENTS_DIR/"
-    launchctl bootstrap "gui/$(id -u)" "$AGENTS_DIR/$(basename "$plist")"
+    # Retry once on transient I/O error (5) — launchd race on rapid bootout→bootstrap
+    if ! launchctl bootstrap "gui/$(id -u)" "$AGENTS_DIR/$(basename "$plist")" 2>/dev/null; then
+        sleep 2
+        launchctl bootstrap "gui/$(id -u)" "$AGENTS_DIR/$(basename "$plist")"
+    fi
     echo "  ✓ $label installed and running"
 }
 
@@ -26,9 +34,10 @@ echo ""
 echo "  Installing Farhan's DevFleet™ as launchd services..."
 echo ""
 
-# Kill any processes currently on the ports so launchd can bind them
+# Kill any processes currently on the ports so launchd can bind them cleanly
 lsof -ti :18801 | xargs kill -9 2>/dev/null || true
 lsof -ti :3100  | xargs kill -9 2>/dev/null || true
+sleep 1  # let the OS release the ports before launchd tries to bind them
 
 install_plist "$SCRIPT_DIR/com.farhan.devfleet-api.plist"
 install_plist "$SCRIPT_DIR/com.farhan.devfleet-ui.plist"
