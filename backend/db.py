@@ -157,6 +157,30 @@ CREATE TABLE IF NOT EXISTS lanes (
     enabled INTEGER DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS lane_mcp_tools (
+    id TEXT PRIMARY KEY,
+    lane_name TEXT NOT NULL REFERENCES lanes(name) ON DELETE CASCADE,
+    server_name TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    enabled INTEGER DEFAULT 1,
+    trigger_hint TEXT DEFAULT 'always',
+    UNIQUE(lane_name, server_name, tool_name)
+);
+
+CREATE TABLE IF NOT EXISTS lane_prompt_critiques (
+    lane_name TEXT PRIMARY KEY REFERENCES lanes(name) ON DELETE CASCADE,
+    critique_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS prompt_templates (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    category TEXT DEFAULT 'general',
+    content_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 
@@ -208,7 +232,8 @@ async def init_db():
                 pass  # Column already exists
 
         # Full re-sync of all lane fields from LANE_DEFAULTS
-        # INSERT OR IGNORE seeds new lanes; UPDATE syncs stale rows (model, slots, prompt)
+        # INSERT OR IGNORE seeds new lanes; UPDATE syncs capacity/model/preset/style — but NOT
+        # append_prompt, which the user can customise via Prompt Studio and must survive restarts.
         # Also disables lanes no longer in LANE_DEFAULTS (deprecated/renamed lanes)
         from models import LANE_DEFAULTS as _LD
         await db.execute(
@@ -223,7 +248,6 @@ async def init_db():
                      max_agents    = excluded.max_agents,
                      default_model = excluded.default_model,
                      tool_preset   = excluded.tool_preset,
-                     append_prompt = excluded.append_prompt,
                      color         = excluded.color,
                      icon          = excluded.icon""",
                 (
@@ -265,6 +289,28 @@ async def init_db():
                     policy["icon"],
                 ),
             )
+
+        # Seed default MCP tools per lane (INSERT OR IGNORE — preserves user toggles)
+        _DEVFLEET_TOOLS = [
+            ("devfleet-context", "get_mission_context", "always"),
+            ("devfleet-context", "get_project_context", "always"),
+            ("devfleet-context", "get_session_history", "always"),
+            ("devfleet-context", "get_team_context", "always"),
+            ("devfleet-context", "read_past_reports", "always"),
+            ("devfleet-tools", "submit_report", "always"),
+            ("devfleet-tools", "create_sub_mission", "only when spawning parallel sub-tasks"),
+            ("devfleet-tools", "request_review", "after completing implementation"),
+            ("devfleet-tools", "get_sub_mission_status", "when waiting on sub-missions"),
+            ("devfleet-tools", "list_project_missions", "when checking project context"),
+        ]
+        for _lane_name in _LD:
+            for _server, _tool, _hint in _DEVFLEET_TOOLS:
+                _tool_id = f"{_lane_name}__{_server}__{_tool}"
+                await db.execute(
+                    """INSERT OR IGNORE INTO lane_mcp_tools (id, lane_name, server_name, tool_name, trigger_hint)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (_tool_id, _lane_name, _server, _tool, _hint),
+                )
 
         # Backfill missions.lane from mission_type for existing rows
         await db.execute("""

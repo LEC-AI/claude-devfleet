@@ -10,6 +10,7 @@ import StatusPage from './pages/StatusPage';
 import ProjectDetail from './pages/ProjectDetail';
 import Integrations from './pages/Integrations';
 import FleetConfig from './pages/FleetConfig';
+import PromptStudio from './pages/PromptStudio';
 
 function App() {
   const [page, setPage] = useState('dashboard');
@@ -42,6 +43,8 @@ function App() {
         return <StatusPage navigate={navigate} />;
       case 'fleet-config':
         return <FleetConfig navigate={navigate} />;
+      case 'prompt-studio':
+        return <PromptStudio navigate={navigate} />;
       default:
         return <Dashboard navigate={navigate} />;
     }

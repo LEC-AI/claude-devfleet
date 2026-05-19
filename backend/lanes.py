@@ -8,6 +8,7 @@ lane controls how many agents of each role run in parallel.
 """
 
 import asyncio
+import json
 import logging
 from typing import Optional
 
@@ -149,6 +150,83 @@ async def get_one_lane(name: str) -> Optional[dict]:
         return dict(rows[0]) if rows else None
     finally:
         await conn.close()
+
+
+_EMPTY_PROMPT: dict = {"role": "", "rules": [], "quality_gates": [], "context_hints": []}
+
+
+def parse_prompt_json(raw: str) -> dict:
+    """Parse append_prompt TEXT as structured JSON; wrap plain strings gracefully."""
+    if not raw:
+        return dict(_EMPTY_PROMPT)
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict) and "role" in data:
+            return {**_EMPTY_PROMPT, **data}
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return {**_EMPTY_PROMPT, "role": raw}
+
+
+def assemble_prompt_text(prompt_json: dict) -> str:
+    """Convert structured prompt JSON into flat text for SDK dispatch."""
+    parts = []
+    if prompt_json.get("role"):
+        parts.append(prompt_json["role"])
+    if prompt_json.get("rules"):
+        parts.append("\n\nRules:\n" + "\n".join(
+            f"{i + 1}. {r}" for i, r in enumerate(prompt_json["rules"])
+        ))
+    if prompt_json.get("quality_gates"):
+        parts.append("\n\nQuality Gates:\n" + "\n".join(
+            f"- {g}" for g in prompt_json["quality_gates"]
+        ))
+    if prompt_json.get("context_hints"):
+        parts.append("\n\nContext Hints:\n" + "\n".join(
+            f"- {h}" for h in prompt_json["context_hints"]
+        ))
+    return "".join(parts)
+
+
+async def get_lane_mcp_tools(lane_name: str) -> list[dict]:
+    """Return all MCP tool rows for a lane, ordered by server/tool name."""
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT * FROM lane_mcp_tools WHERE lane_name = ? ORDER BY server_name, tool_name",
+            (lane_name,),
+        )
+        return [dict(r) for r in rows]
+    finally:
+        await conn.close()
+
+
+async def upsert_lane_mcp_tool(
+    lane_name: str, server_name: str, tool_name: str, enabled: bool, trigger_hint: str
+) -> dict:
+    """Toggle enabled state and trigger hint for a specific MCP tool in a lane."""
+    tool_id = f"{lane_name}__{server_name}__{tool_name}"
+    conn = await db.get_db()
+    try:
+        await conn.execute(
+            """INSERT INTO lane_mcp_tools (id, lane_name, server_name, tool_name, enabled, trigger_hint)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(lane_name, server_name, tool_name) DO UPDATE SET
+                 enabled = excluded.enabled,
+                 trigger_hint = excluded.trigger_hint""",
+            (tool_id, lane_name, server_name, tool_name, int(enabled), trigger_hint),
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+    return {
+        "id": tool_id,
+        "lane_name": lane_name,
+        "server_name": server_name,
+        "tool_name": tool_name,
+        "enabled": enabled,
+        "trigger_hint": trigger_hint,
+    }
 
 
 async def update_lane(name: str, patch: dict) -> Optional[dict]:

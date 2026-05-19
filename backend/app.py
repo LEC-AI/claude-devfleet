@@ -626,6 +626,42 @@ async def get_lanes():
     return await lane_snapshot()
 
 
+@app.get("/api/lanes/studio-summary")
+async def lanes_studio_summary():
+    """Fleet-wide Prompt Studio stats for the Dashboard card."""
+    conn = await db.get_db()
+    try:
+        total = (await (await conn.execute(
+            "SELECT COUNT(*) FROM lanes WHERE enabled=1"
+        )).fetchone())[0]
+        customized = (await (await conn.execute(
+            "SELECT COUNT(*) FROM lanes WHERE json_valid(append_prompt) AND enabled=1"
+        )).fetchone())[0]
+        disabled_tools = (await (await conn.execute(
+            "SELECT COUNT(*) FROM lane_mcp_tools WHERE enabled=0"
+        )).fetchone())[0]
+        critiques = (await (await conn.execute(
+            "SELECT COUNT(*) FROM lane_prompt_critiques"
+        )).fetchone())[0]
+    finally:
+        await conn.close()
+    return {
+        "total_lanes": total,
+        "customized_count": customized,
+        "disabled_tools_count": disabled_tools,
+        "critiques_available": critiques,
+    }
+
+
+@app.post("/api/lanes/run-critique")
+async def run_lane_critique_batch():
+    """Trigger one-time Opus 4.7 critique for all lanes. Returns immediately; runs in background."""
+    import asyncio as _asyncio
+    from lane_critique import run_critique_batch
+    _asyncio.create_task(run_critique_batch())
+    return {"status": "started", "message": "Opus critique batch running in background (~30s)"}
+
+
 @app.get("/api/lanes/{name}")
 async def get_lane(name: str):
     from lanes import get_one_lane
@@ -645,6 +681,59 @@ async def update_lane_endpoint(name: str, body: dict):
     patch = {k: v for k, v in body.items() if k in allowed}
     updated = await update_lane(name, patch)
     return updated
+
+
+@app.get("/api/lanes/{name}/prompt")
+async def get_lane_prompt(name: str):
+    from lanes import get_one_lane, parse_prompt_json
+    lane = await get_one_lane(name)
+    if not lane:
+        raise HTTPException(404, f"Lane '{name}' not found")
+    return parse_prompt_json(lane.get("append_prompt", ""))
+
+
+@app.put("/api/lanes/{name}/prompt")
+async def update_lane_prompt(name: str, body: dict):
+    from lanes import get_one_lane, update_lane
+    if not await get_one_lane(name):
+        raise HTTPException(404, f"Lane '{name}' not found")
+    allowed_keys = {"role", "rules", "quality_gates", "context_hints"}
+    prompt_json = {k: v for k, v in body.items() if k in allowed_keys}
+    await update_lane(name, {"append_prompt": json.dumps(prompt_json)})
+    return prompt_json
+
+
+@app.get("/api/lanes/{name}/mcp-tools")
+async def get_lane_mcp_tools_endpoint(name: str):
+    from lanes import get_lane_mcp_tools
+    return await get_lane_mcp_tools(name)
+
+
+@app.put("/api/lanes/{name}/mcp-tools/{server}/{tool}")
+async def update_lane_mcp_tool(name: str, server: str, tool: str, body: dict):
+    from lanes import upsert_lane_mcp_tool
+    enabled = body.get("enabled", True)
+    trigger_hint = body.get("trigger_hint", "always")
+    return await upsert_lane_mcp_tool(name, server, tool, bool(enabled), trigger_hint)
+
+
+@app.get("/api/lanes/{name}/prompt-critique")
+async def get_lane_critique(name: str):
+    conn = await db.get_db()
+    try:
+        row = await (await conn.execute(
+            "SELECT * FROM lane_prompt_critiques WHERE lane_name = ?", (name,)
+        )).fetchone()
+    finally:
+        await conn.close()
+    if not row:
+        return {"lane_name": name, "critique_json": None, "created_at": None}
+    row_dict = dict(row)
+    try:
+        row_dict["critique_json"] = json.loads(row_dict["critique_json"])
+    except Exception:
+        pass
+    return row_dict
 
 
 @app.get("/api/fleet/summary")

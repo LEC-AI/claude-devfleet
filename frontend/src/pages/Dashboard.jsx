@@ -34,12 +34,13 @@ const LANE_ICON = {
 };
 
 export default function Dashboard({ navigate }) {
-  const [summary, setSummary]   = useState(null);
-  const [lanes, setLanes]       = useState([]);
-  const [missions, setMissions] = useState([]);
-  const [sessions, setSessions] = useState([]);
-  const [clock, setClock]       = useState('');
-  const [error, setError]       = useState(null);
+  const [summary, setSummary]       = useState(null);
+  const [lanes, setLanes]           = useState([]);
+  const [missions, setMissions]     = useState([]);
+  const [sessions, setSessions]     = useState([]);
+  const [studioSummary, setStudio]  = useState(null);
+  const [clock, setClock]           = useState('');
+  const [error, setError]           = useState(null);
 
   const tick = () => {
     const n = new Date();
@@ -49,16 +50,18 @@ export default function Dashboard({ navigate }) {
 
   const load = useCallback(async () => {
     try {
-      const [sum, lns, mis, ses] = await Promise.all([
+      const [sum, lns, mis, ses, studio] = await Promise.all([
         fetch(`${API}/fleet/summary`).then(r => r.json()),
         fetch(`${API}/lanes`).then(r => r.json()),
         fetch(`${API}/missions`).then(r => r.json()),
         fetch(`${API}/sessions`).then(r => r.json()),
+        fetch(`${API}/lanes/studio-summary`).then(r => r.json()).catch(() => null),
       ]);
       setSummary(sum);
       setLanes(Array.isArray(lns) ? lns : []);
       setMissions(Array.isArray(mis) ? mis : []);
       setSessions(Array.isArray(ses) ? ses : []);
+      setStudio(studio);
       setError(null);
     } catch (e) {
       setError(e.message);
@@ -203,7 +206,8 @@ export default function Dashboard({ navigate }) {
             {[
               { icon: '📁', label: 'New Project', sub: 'Start a new codebase or task group', page: 'projects' },
               { icon: '🚀', label: 'Mission Board', sub: 'Browse + dispatch pending missions', page: 'missions' },
-              { icon: '⚙️', label: 'Fleet Config', sub: 'Edit lane prompts, slots, models', page: 'fleet-config' },
+              { icon: '⚙️', label: 'Fleet Config', sub: 'Edit lane capacity, models, presets', page: 'fleet-config' },
+              { icon: '✏️', label: 'Prompt Studio', sub: 'Edit lane prompts + MCP tool toggles', page: 'prompt-studio' },
               { icon: '📊', label: 'Reports', sub: 'Browse filed agent reports', page: 'reports' },
               { icon: '🔌', label: 'Integrations', sub: 'MCP servers + external tool wiring', page: 'integrations' },
               { icon: '❤️', label: 'System Status', sub: 'Health monitor + incident log', page: 'status' },
@@ -219,6 +223,30 @@ export default function Dashboard({ navigate }) {
             ))}
           </div>
         </div>
+
+        {/* Prompt Studio summary */}
+        {studioSummary && (
+          <div className="dash-card">
+            <div className="dash-card-header">
+              <span>Prompt Studio</span>
+              <button className="dash-card-btn" onClick={() => navigate('prompt-studio')}>Open Studio →</button>
+            </div>
+            <div className="studio-summary">
+              <div className="studio-stat">
+                <span className="studio-stat-val">{studioSummary.customized_count}</span>
+                <span className="studio-stat-label">/ {studioSummary.total_lanes} lanes customised</span>
+              </div>
+              <div className="studio-stat">
+                <span className="studio-stat-val">{studioSummary.disabled_tools_count}</span>
+                <span className="studio-stat-label">MCP tools disabled</span>
+              </div>
+              <div className="studio-stat">
+                <span className="studio-stat-val">{studioSummary.critiques_available}</span>
+                <span className="studio-stat-label">Opus critiques stored</span>
+              </div>
+            </div>
+          </div>
+        )}
 
       </div>
     </div>

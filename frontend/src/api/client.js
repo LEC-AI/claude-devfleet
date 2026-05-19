@@ -219,3 +219,17 @@ export const planProject = (prompt, projectPath) => request('/plan', {
 
 // ── Plugins ──
 export const getPlugins = () => request('/plugins');
+
+// ── Prompt Studio ──
+export const getLanePrompt = (name) => request(`/lanes/${name}/prompt`);
+export const updateLanePrompt = (name, data) =>
+  request(`/lanes/${name}/prompt`, { method: 'PUT', body: JSON.stringify(data) });
+export const getLaneMcpTools = (name) => request(`/lanes/${name}/mcp-tools`);
+export const updateLaneMcpTool = (name, server, tool, data) =>
+  request(
+    `/lanes/${name}/mcp-tools/${encodeURIComponent(server)}/${encodeURIComponent(tool)}`,
+    { method: 'PUT', body: JSON.stringify(data) }
+  );
+export const getLaneCritique = (name) => request(`/lanes/${name}/prompt-critique`);
+export const runLaneCritique = () => request('/lanes/run-critique', { method: 'POST' });
+export const getLanesStudioSummary = () => request('/lanes/studio-summary');
