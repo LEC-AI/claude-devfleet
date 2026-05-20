@@ -238,11 +238,11 @@ export default function Dashboard({ navigate }) {
               </div>
               <div className="studio-stat">
                 <span className="studio-stat-val">{studioSummary.disabled_tools_count}</span>
-                <span className="studio-stat-label">MCP tools disabled</span>
+                <span className="studio-stat-label"> MCP tools disabled</span>
               </div>
               <div className="studio-stat">
                 <span className="studio-stat-val">{studioSummary.critiques_available}</span>
-                <span className="studio-stat-label">Opus critiques stored</span>
+                <span className="studio-stat-label"> Opus critiques stored</span>
               </div>
             </div>
           </div>
