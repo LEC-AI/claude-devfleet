@@ -98,7 +98,7 @@ export default function Dashboard({ navigate }) {
       <div className="dash-hero">
         <div className="dash-hero-bg" />
         <div className="dash-hero-content">
-          <div className="dash-eyebrow">Farhan's DevFleet™</div>
+          <div className="dash-eyebrow">Nexis365 DevFleet™</div>
           <h1 className="dash-title">Mission Control</h1>
           <div className="dash-clock">{clock}</div>
           <div className="dash-pills">
