@@ -60,6 +60,9 @@ async def create_worktree(
 
     os.makedirs(worktree_dir, exist_ok=True)
 
+    # Always fetch before branching so origin/dev is current
+    await _run(["git", "fetch", "origin", "dev"], project_path)
+
     # Branch from origin/dev (not HEAD — avoids inheriting operator's feature branch)
     code, out, err = await _run(
         ["git", "worktree", "add", "-b", branch_name, worktree_path, "origin/dev"],
