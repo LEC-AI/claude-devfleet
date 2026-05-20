@@ -6,9 +6,9 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 import db
@@ -119,12 +119,53 @@ async def lifespan(app):
 
 app = FastAPI(title="Claude DevFleet API", lifespan=lifespan)
 
+_ALLOWED_ORIGINS = [
+    o.strip() for o in
+    os.environ.get("DEVFLEET_ALLOWED_ORIGINS",
+                   "http://localhost:3100,http://localhost:3101").split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as _StarletteRequest
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    _PUBLIC_EXACT = {"/api/auth/login", "/api/auth/register"}
+    _PUBLIC_PREFIXES = ("/mcp", "/messages", "/api/status")
+
+    async def dispatch(self, request: _StarletteRequest, call_next):
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        path = request.url.path
+        if path in self._PUBLIC_EXACT or any(path.startswith(p) for p in self._PUBLIC_PREFIXES):
+            return await call_next(request)
+        if path.startswith("/api/"):
+            from jose import JWTError as _JWTError
+            raw = None
+            auth_h = request.headers.get("authorization", "")
+            if auth_h.startswith("Bearer "):
+                raw = auth_h[7:]
+            else:
+                raw = request.query_params.get("token")
+            if not raw:
+                return JSONResponse({"detail": "Authentication required"}, status_code=401)
+            try:
+                from auth import decode_token as _dt
+                request.state.user = _dt(raw)
+            except _JWTError:
+                return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+        return await call_next(request)
+
+
+app.add_middleware(AuthMiddleware)
 
 MAX_CONCURRENT_AGENTS = int(os.environ.get("DEVFLEET_MAX_AGENTS", "0"))  # 0 = defer to lane system
 
@@ -238,6 +279,129 @@ app.mount("/mcp", Mount(path="", routes=[
     Route("/sse", endpoint=_McpSseEndpoint()),
     Route("/messages/", endpoint=_McpPostEndpoint(), methods=["POST"]),
 ]))
+
+
+# ──────────────────────────────────────────────
+# Auth Routes
+# ──────────────────────────────────────────────
+from models import UserCreate, UserLogin
+
+@app.post("/api/auth/login")
+async def auth_login(body: UserLogin):
+    from auth import get_user_by_email, verify_password, create_access_token
+    user = await get_user_by_email(body.email)
+    if not user or not verify_password(body.password, user["password_hash"]):
+        raise HTTPException(401, "Invalid email or password")
+    conn = await db.get_db()
+    try:
+        await conn.execute("UPDATE users SET last_login_at=datetime('now') WHERE id=?", (user["id"],))
+        await conn.commit()
+    finally:
+        await conn.close()
+    token = create_access_token(user["id"], user["email"], user["role"])
+    return {"access_token": token, "token_type": "bearer",
+            "user": {"id": user["id"], "email": user["email"], "role": user["role"]}}
+
+
+@app.post("/api/auth/register")
+async def auth_register(body: UserCreate):
+    from auth import get_user_by_email, create_user, consume_invite_token, create_access_token
+    if await get_user_by_email(body.email):
+        raise HTTPException(400, "Email already registered")
+    try:
+        user = await create_user(body.email, body.password)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    valid = await consume_invite_token(body.invite_token, user["id"])
+    if not valid:
+        conn = await db.get_db()
+        try:
+            await conn.execute("DELETE FROM users WHERE id=?", (user["id"],))
+            await conn.commit()
+        finally:
+            await conn.close()
+        raise HTTPException(400, "Invalid, expired, or already-used invite token")
+    token = create_access_token(user["id"], user["email"], user["role"])
+    return {"access_token": token, "token_type": "bearer",
+            "user": {"id": user["id"], "email": user["email"], "role": user["role"]}}
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Not authenticated")
+    return {"id": user["sub"], "email": user["email"], "role": user["role"]}
+
+
+@app.post("/api/auth/invite")
+async def auth_invite(request: Request):
+    user = getattr(request.state, "user", None)
+    if not user or user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    from auth import create_invite_token
+    token = await create_invite_token(user["sub"])
+    return {"invite_token": token, "expires_in": "7 days"}
+
+
+@app.get("/api/auth/users")
+async def auth_list_users(request: Request):
+    user = getattr(request.state, "user", None)
+    if not user or user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT id, email, role, created_at, last_login_at FROM users ORDER BY created_at"
+        )
+        return [dict(r) for r in rows]
+    finally:
+        await conn.close()
+
+
+# ──────────────────────────────────────────────
+# Fleet Events SSE
+# ──────────────────────────────────────────────
+_fleet_subscribers: list[asyncio.Queue] = []
+
+
+async def broadcast_fleet_event(event: dict):
+    dead = []
+    for q in _fleet_subscribers:
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            dead.append(q)
+    for q in dead:
+        if q in _fleet_subscribers:
+            _fleet_subscribers.remove(q)
+
+
+@app.get("/api/events")
+async def fleet_events_stream(request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    q: asyncio.Queue = asyncio.Queue(maxsize=100)
+    _fleet_subscribers.append(q)
+
+    async def event_stream():
+        try:
+            yield f"data: {json.dumps({'type': 'connected', 'user': user['email']})}\n\n"
+            while True:
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=30)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+        finally:
+            if q in _fleet_subscribers:
+                _fleet_subscribers.remove(q)
+
+    return StreamingResponse(
+        event_stream(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ──────────────────────────────────────────────

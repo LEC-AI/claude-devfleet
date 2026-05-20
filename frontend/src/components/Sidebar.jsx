@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { getDashboardStats } from '../api/client';
+import { useAuth } from '../auth';
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1' },
@@ -12,6 +13,7 @@ const NAV = [
 ];
 
 export default function Sidebar({ activePage, navigate }) {
+  const { user, logout, isAdmin } = useAuth();
   const [runningAgents, setRunningAgents] = useState(0);
 
   useEffect(() => {
@@ -66,6 +68,14 @@ export default function Sidebar({ activePage, navigate }) {
         </div>
         <div className="sidebar-version">v2026.05</div>
       </div>
+
+      {user && (
+        <div className="sidebar-user-section">
+          <div className="sidebar-user-email" title={user.email}>{user.email}</div>
+          {isAdmin && <div className="sidebar-user-role">Admin</div>}
+          <button className="sidebar-logout" onClick={logout}>Sign out</button>
+        </div>
+      )}
     </aside>
   );
 }

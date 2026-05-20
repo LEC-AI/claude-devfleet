@@ -181,6 +181,26 @@ CREATE TABLE IF NOT EXISTS prompt_templates (
     content_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT DEFAULT 'user',
+    created_at TEXT DEFAULT (datetime('now')),
+    last_login_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS invite_tokens (
+    token TEXT PRIMARY KEY,
+    created_by TEXT NOT NULL REFERENCES users(id),
+    used_by TEXT REFERENCES users(id),
+    used_at TEXT,
+    expires_at TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 """
 
 
@@ -224,6 +244,8 @@ async def init_db():
             "ALTER TABLE agent_sessions ADD COLUMN cache_creation_tokens INTEGER DEFAULT 0",
             # v7: lane-aware branch naming
             "ALTER TABLE agent_sessions ADD COLUMN branch_name TEXT DEFAULT ''",
+            # v8: online auth
+            "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'",
         ]
         for migration in migrations:
             try:
@@ -326,6 +348,24 @@ async def init_db():
             END
             WHERE lane IS NULL OR lane = ''
         """)
+
+        # Seed first admin from env if no users exist
+        _admin_email = os.environ.get("DEVFLEET_ADMIN_EMAIL")
+        _admin_pw = os.environ.get("DEVFLEET_ADMIN_PASSWORD")
+        if _admin_email and _admin_pw:
+            _existing = await db.execute_fetchall(
+                "SELECT id FROM users WHERE email=?", (_admin_email,)
+            )
+            if not _existing:
+                from auth import hash_password as _hp
+                import uuid as _uuid
+                _aid = str(_uuid.uuid4())
+                await db.execute(
+                    "INSERT INTO users (id, email, password_hash, role) VALUES (?,?,?,'admin')",
+                    (_aid, _admin_email, _hp(_admin_pw))
+                )
+                import logging as _logging
+                _logging.getLogger("devfleet").info("Seeded initial admin: %s", _admin_email)
 
         await db.commit()
 

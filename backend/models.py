@@ -390,3 +390,25 @@ class McpServerCreate(BaseModel):
     server_name: str                          # e.g. "github", "brave-search", "memory"
     server_type: str = "stdio"                # stdio, sse, http
     config: dict = {}                         # command, args, env, url, headers etc.
+
+
+# ── Auth Models ──────────────────────────────────────────────────────────────
+
+class UserCreate(BaseModel):
+    email: str
+    password: str
+    invite_token: str
+
+class UserLogin(BaseModel):
+    email: str
+    password: str
+
+class UserOut(BaseModel):
+    id: str
+    email: str
+    role: str
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserOut

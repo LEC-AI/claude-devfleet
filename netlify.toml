@@ -1,0 +1,14 @@
+[build]
+  base = "frontend"
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+  # Set VITE_API_URL in Netlify dashboard:
+  # Site settings → Environment variables → VITE_API_URL = https://devfleet.yourdomain.com
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

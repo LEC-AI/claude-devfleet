@@ -1,10 +1,20 @@
-const API = '/api';
+const API = (import.meta.env.VITE_API_URL || '') + '/api';
 
 async function request(path, options = {}) {
+  const token = localStorage.getItem('devfleet_token');
   const res = await fetch(`${API}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...options.headers,
+    },
     ...options,
   });
+  if (res.status === 401) {
+    localStorage.removeItem('devfleet_token');
+    window.dispatchEvent(new CustomEvent('devfleet:logout'));
+    throw new Error('Session expired — please log in again');
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail || `Request failed: ${res.status}`);
@@ -60,7 +70,8 @@ export const cancelSession = (id) => request(`/sessions/${id}/cancel`, { method:
 
 // ── SSE streaming for live agent output ──
 export function streamSession(sessionId, { onEvent, onBackfill, onDone, onError }) {
-  const evtSource = new EventSource(`${API}/sessions/${sessionId}/stream`);
+  const _tok = localStorage.getItem('devfleet_token') || '';
+  const evtSource = new EventSource(`${API}/sessions/${sessionId}/stream?token=${_tok}`);
 
   evtSource.onmessage = (e) => {
     try {
@@ -128,7 +139,8 @@ export const getAutoLoopStatus = (projectId) =>
 
 // ── Remote Control ──
 export function streamRemoteSession(sessionId, { onText, onBackfill, onDone, onError }) {
-  const evtSource = new EventSource(`${API}/sessions/${sessionId}/remote-stream`);
+  const _rtok = localStorage.getItem('devfleet_token') || '';
+  const evtSource = new EventSource(`${API}/sessions/${sessionId}/remote-stream?token=${_rtok}`);
 
   evtSource.onmessage = (e) => {
     try {
@@ -235,3 +247,19 @@ export const updateLaneMcpTool = (name, server, tool, data) =>
 export const getLaneCritique = (name) => request(`/lanes/${name}/prompt-critique`);
 export const runLaneCritique = () => request('/lanes/run-critique', { method: 'POST' });
 export const getLanesStudioSummary = () => request('/lanes/studio-summary');
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+export const login = (data) => request('/auth/login', { method: 'POST', body: JSON.stringify(data) });
+export const register = (data) => request('/auth/register', { method: 'POST', body: JSON.stringify(data) });
+export const getMe = () => request('/auth/me');
+export const createInvite = () => request('/auth/invite', { method: 'POST' });
+export const listUsers = () => request('/auth/users');
+
+// ── Global Fleet Events SSE ───────────────────────────────────────────────────
+export function streamFleetEvents({ onEvent, onError }) {
+  const token = localStorage.getItem('devfleet_token') || '';
+  const evtSource = new EventSource(`${API}/events?token=${token}`);
+  evtSource.onmessage = (e) => { try { onEvent?.(JSON.parse(e.data)); } catch {} };
+  evtSource.onerror = (e) => { onError?.(e); };
+  return () => evtSource.close();
+}
