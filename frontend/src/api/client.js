@@ -5,6 +5,7 @@ async function request(path, options = {}) {
   const res = await fetch(`${API}${path}`, {
     headers: {
       'Content-Type': 'application/json',
+      'ngrok-skip-browser-warning': '1',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options.headers,
     },

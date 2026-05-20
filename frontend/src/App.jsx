@@ -14,6 +14,7 @@ import PromptStudio from './pages/PromptStudio';
 import { AuthProvider, useAuth } from './auth';
 import Login from './pages/Login';
 import Register from './pages/Register';
+import Splash from './pages/Splash';
 
 function AppInner() {
   const { user, loading } = useAuth();
@@ -65,6 +66,8 @@ function AppInner() {
         return <FleetConfig navigate={navigate} />;
       case 'prompt-studio':
         return <PromptStudio navigate={navigate} />;
+      case 'splash':
+        return <Splash navigate={navigate} />;
       case 'login':
         return <Login navigate={navigate} />;
       case 'register':
