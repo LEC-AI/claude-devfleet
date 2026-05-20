@@ -19,6 +19,10 @@ from datetime import datetime, timezone
 
 import db
 
+# How often to fetch origin/dev for all registered git projects (seconds)
+_GIT_SYNC_INTERVAL = int(os.environ.get("DEVFLEET_GIT_SYNC_INTERVAL", "300"))  # 5 min default
+_git_sync_task: asyncio.Task | None = None
+
 log = logging.getLogger("devfleet.scheduler")
 
 _scheduler_task: asyncio.Task | None = None
@@ -170,24 +174,70 @@ async def _scheduler_loop():
         await asyncio.sleep(CHECK_INTERVAL)
 
 
+async def _fetch_project(path: str) -> None:
+    """Run git fetch origin dev for a single project path."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "fetch", "origin", "dev",
+            cwd=path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        if proc.returncode != 0:
+            log.warning("git fetch failed for %s: %s", path, stderr.decode().strip()[:200])
+        else:
+            log.debug("git fetch origin dev OK: %s", path)
+    except asyncio.TimeoutError:
+        log.warning("git fetch timed out for %s", path)
+    except Exception as e:
+        log.debug("git fetch skipped for %s: %s", path, e)
+
+
+async def _git_sync_loop():
+    """Periodically fetch origin/dev for all registered git projects."""
+    log.info("Git sync loop started (every %ds)", _GIT_SYNC_INTERVAL)
+    while True:
+        await asyncio.sleep(_GIT_SYNC_INTERVAL)
+        try:
+            conn = await db.get_db()
+            try:
+                rows = await conn.execute_fetchall("SELECT path FROM projects WHERE path IS NOT NULL AND path != ''")
+            finally:
+                await conn.close()
+
+            paths = [r["path"] for r in rows if r["path"] and os.path.isdir(os.path.join(r["path"], ".git"))]
+            if paths:
+                log.info("Git sync: fetching origin/dev for %d project(s)", len(paths))
+                await asyncio.gather(*[_fetch_project(p) for p in paths], return_exceptions=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.error("Git sync loop error: %s", e)
+
+
 async def start_scheduler():
-    """Start the scheduler background task."""
-    global _scheduler_task
+    """Start the scheduler and git sync background tasks."""
+    global _scheduler_task, _git_sync_task
     if _scheduler_task and not _scheduler_task.done():
         return
     _scheduler_task = asyncio.create_task(_scheduler_loop())
+    _git_sync_task = asyncio.create_task(_git_sync_loop())
+    log.info("Git sync task started (interval: %ds)", _GIT_SYNC_INTERVAL)
 
 
 async def stop_scheduler():
-    """Stop the scheduler."""
-    global _scheduler_task
-    if _scheduler_task and not _scheduler_task.done():
-        _scheduler_task.cancel()
-        try:
-            await _scheduler_task
-        except asyncio.CancelledError:
-            pass
+    """Stop the scheduler and git sync tasks."""
+    global _scheduler_task, _git_sync_task
+    for task in (_scheduler_task, _git_sync_task):
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
     _scheduler_task = None
+    _git_sync_task = None
 
 
 def get_scheduler_status() -> dict:
