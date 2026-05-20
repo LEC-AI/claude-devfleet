@@ -3,9 +3,8 @@ import {
   getLanePrompt, updateLanePrompt,
   getLaneMcpTools, updateLaneMcpTool,
   getLaneCritique, runLaneCritique,
+  listLanes,
 } from '../api/client';
-
-const API = '/api';
 
 function OrderedListEditor({ label, items, onChange, placeholder }) {
   const [draft, setDraft] = useState('');
@@ -160,8 +159,7 @@ export default function PromptStudio({ navigate }) {
 
   // Load lane list on mount
   useEffect(() => {
-    fetch(`${API}/lanes`)
-      .then(r => r.json())
+    listLanes()
       .then(data => {
         const list = Array.isArray(data) ? data : [];
         setLanes(list);

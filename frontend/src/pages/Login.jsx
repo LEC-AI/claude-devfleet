@@ -3,8 +3,8 @@ import { login as loginApi } from '../api/client';
 import { useAuth } from '../auth';
 
 const MEMBERS = [
-  { id: 'farhan', name: 'Farhan', handle: 'gUBII',          initial: 'F', email: 'farhan@devfleet.local', photo: '/avatars/farhan.png' },
-  { id: 'hasan',  name: 'Hasan',  handle: 'genesisprime01',  initial: 'H', email: 'hasan@devfleet.local',  photo: '/avatars/hasan.png' },
+  { id: 'farhan', name: 'Farhan', handle: 'gUBII',          initial: 'F', email: 'farhan@devfleet.local', photo: null },
+  { id: 'hasan',  name: 'Hasan',  handle: 'genesisprime01',  initial: 'H', email: 'hasan@devfleet.local',  photo: null },
   { id: 'adil',   name: 'Adil',   handle: 'mugdho080',       initial: 'A', email: 'adil@devfleet.local',   photo: '/avatars/adil.png' },
 ];
 

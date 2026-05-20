@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { getSystemStatus, setGlobalCeiling } from '../api/client';
+import { getSystemStatus, setGlobalCeiling, listLanes, updateLane } from '../api/client';
 
 const MODELS = [
   'claude-sonnet-4-6',
@@ -21,13 +21,7 @@ function LaneEditor({ lane, onSave, onClose }) {
     setSaving(true);
     setError(null);
     try {
-      const res = await fetch(`/api/lanes/${lane.name}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const updated = await res.json();
+      const updated = await updateLane(lane.name, form);
       onSave(updated);
     } catch (e) {
       setError(e.message);
@@ -160,7 +154,7 @@ export default function FleetConfig() {
     setLoading(true);
     try {
       const [lanesRes, statusRes] = await Promise.all([
-        fetch('/api/lanes').then(r => r.json()),
+        listLanes(),
         getSystemStatus(),
       ]);
       setLanes(lanesRes);

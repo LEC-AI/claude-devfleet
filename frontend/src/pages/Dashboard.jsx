@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { listLanes, listMissions, listSessions, getDashboardStats, getLanesStudioSummary } from '../api/client';
 
-const API = '/api';
+const _API_BASE = (import.meta.env.VITE_API_URL || '') + '/api';
 
 function timeAgo(d) {
   if (!d) return '';
@@ -51,11 +52,11 @@ export default function Dashboard({ navigate }) {
   const load = useCallback(async () => {
     try {
       const [sum, lns, mis, ses, studio] = await Promise.all([
-        fetch(`${API}/fleet/summary`).then(r => r.json()),
-        fetch(`${API}/lanes`).then(r => r.json()),
-        fetch(`${API}/missions`).then(r => r.json()),
-        fetch(`${API}/sessions`).then(r => r.json()),
-        fetch(`${API}/lanes/studio-summary`).then(r => r.json()).catch(() => null),
+        getDashboardStats(),
+        listLanes(),
+        listMissions(),
+        listSessions(),
+        getLanesStudioSummary().catch(() => null),
       ]);
       setSummary(sum);
       setLanes(Array.isArray(lns) ? lns : []);

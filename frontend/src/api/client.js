@@ -235,6 +235,11 @@ export const planProject = (prompt, projectPath) => request('/plan', {
 // ── Plugins ──
 export const getPlugins = () => request('/plugins');
 
+// ── Lanes ──
+export const listLanes = () => request('/lanes');
+export const updateLane = (name, data) =>
+  request(`/lanes/${name}`, { method: 'PUT', body: JSON.stringify(data) });
+
 // ── Prompt Studio ──
 export const getLanePrompt = (name) => request(`/lanes/${name}/prompt`);
 export const updateLanePrompt = (name, data) =>
