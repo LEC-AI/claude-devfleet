@@ -60,12 +60,12 @@ async def create_worktree(
 
     os.makedirs(worktree_dir, exist_ok=True)
 
-    # Always fetch before branching so origin/dev is current
-    await _run(["git", "fetch", "origin", "dev"], project_path)
+    # Always fetch main before branching — main is the canonical baseline (pseudo-prod)
+    await _run(["git", "fetch", "origin", "main"], project_path)
 
-    # Branch from origin/dev (not HEAD — avoids inheriting operator's feature branch)
+    # Branch from origin/main so all agent work is grounded in the current pre-prod state
     code, out, err = await _run(
-        ["git", "worktree", "add", "-b", branch_name, worktree_path, "origin/dev"],
+        ["git", "worktree", "add", "-b", branch_name, worktree_path, "origin/main"],
         project_path,
     )
     if code != 0:

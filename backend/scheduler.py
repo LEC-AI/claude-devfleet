@@ -175,10 +175,10 @@ async def _scheduler_loop():
 
 
 async def _fetch_project(path: str) -> None:
-    """Run git fetch origin dev for a single project path."""
+    """Run git fetch origin main for a single project path."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "git", "fetch", "origin", "dev",
+            "git", "fetch", "origin", "main",
             cwd=path,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
