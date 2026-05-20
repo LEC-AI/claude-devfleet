@@ -52,13 +52,19 @@ export default function Login({ navigate }) {
               type="button"
             >
               <div className="auth-member-avatar">
-                <img
-                  src={m.photo}
-                  alt={m.name}
-                  className="auth-member-photo"
-                  onError={e => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'flex'; }}
-                />
-                <span className="auth-member-initial" style={{ display: 'none' }}>{m.initial}</span>
+                {m.photo ? (
+                  <>
+                    <img
+                      src={m.photo}
+                      alt={m.name}
+                      className="auth-member-photo"
+                      onError={e => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'flex'; }}
+                    />
+                    <span className="auth-member-initial" style={{ display: 'none' }}>{m.initial}</span>
+                  </>
+                ) : (
+                  <span className="auth-member-initial">{m.initial}</span>
+                )}
               </div>
               <div className="auth-member-name">{m.name}</div>
               <div className="auth-member-handle">@{m.handle}</div>

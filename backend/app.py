@@ -971,7 +971,7 @@ async def fleet_summary():
 # ──────────────────────────────────────────────
 
 @app.post("/api/missions/{mid}/dispatch")
-async def dispatch(mid: str, body: DispatchOptions | None = None):
+async def dispatch(request: Request, mid: str, body: DispatchOptions | None = None):
     running_count = sum(1 for t in running_tasks.values() if not t.done())
     if MAX_CONCURRENT_AGENTS > 0 and running_count >= MAX_CONCURRENT_AGENTS:
         raise HTTPException(429, f"Global agent ceiling reached ({running_count}/{MAX_CONCURRENT_AGENTS}) — wait for a slot")
@@ -1015,8 +1015,18 @@ async def dispatch(mid: str, body: DispatchOptions | None = None):
     finally:
         await conn.close()
 
+    # Look up calling user's GitHub token (if they have one stored)
+    _dispatch_user = getattr(request.state, "user", None)
+    _github_token = None
+    if _dispatch_user:
+        _gh_rows = await (await (await db.get_db()).execute(
+            "SELECT github_token FROM users WHERE id=?", (_dispatch_user.get("sub"),)
+        )).fetchone()
+        if _gh_rows and _gh_rows[0]:
+            _github_token = _gh_rows[0]
+
     task = asyncio.create_task(
-        dispatch_mission(session_id, mission, last_report, opts=body)
+        dispatch_mission(session_id, mission, last_report, opts=body, github_token=_github_token)
     )
     running_tasks[session_id] = task
 

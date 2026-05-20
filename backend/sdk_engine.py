@@ -167,6 +167,7 @@ async def _build_sdk_options(
     session_id: str = "",
     resume_session_id: str | None = None,
     extra_mcp_servers: dict | None = None,
+    github_token: str | None = None,
 ) -> ClaudeCodeOptions:
     """Build ClaudeCodeOptions from mission config + dispatch overrides."""
 
@@ -284,6 +285,9 @@ async def _build_sdk_options(
         "DEVFLEET_SESSION_ID": session_id,
         "DEVFLEET_REPORT_DIR": os.path.join(backend_dir, "..", "data", "reports"),
     }
+    if github_token:
+        mcp_env["GITHUB_TOKEN"] = github_token
+        mcp_env["GH_TOKEN"] = github_token
 
     mcp_servers = {
         "devfleet-context": {
@@ -469,6 +473,7 @@ async def _run_agent(
     existing_cost: float = 0.0,
     existing_tokens: int = 0,
     worktree_branch: str | None = None,
+    github_token: str | None = None,
 ):
     """Unified agent runner for both dispatch and resume."""
     output_chunks = []
@@ -513,6 +518,7 @@ async def _run_agent(
             session_id=session_id,
             resume_session_id=resume_session_id,
             extra_mcp_servers=extra_mcp or None,
+            github_token=github_token,
         )
         model_used = sdk_options.model or "claude-sonnet-4-6"
 
@@ -834,6 +840,7 @@ async def dispatch_mission(
     mission: dict,
     last_report: dict | None,
     opts: DispatchOptions | None = None,
+    github_token: str | None = None,
 ):
     """Spawn an agent via SDK to work on a mission."""
     from app import resolve_path
@@ -864,6 +871,7 @@ async def dispatch_mission(
         project_path=project_path,
         opts=opts,
         worktree_branch=worktree_branch,
+        github_token=github_token,
     )
 
 
