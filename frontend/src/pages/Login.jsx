@@ -3,9 +3,9 @@ import { login as loginApi } from '../api/client';
 import { useAuth } from '../auth';
 
 const MEMBERS = [
-  { id: 'farhan', name: 'Farhan', handle: 'gUBII',       initial: 'F', email: 'farhan@devfleet.local', photo: null },
-  { id: 'hasan',  name: 'Hasan',  handle: 'genesisprime', initial: 'H', email: 'hasan@devfleet.local',  photo: null },
-  { id: 'adil',   name: 'Adil',   handle: 'mugdho080',    initial: 'A', email: 'adil@devfleet.local',   photo: null },
+  { id: 'farhan', name: 'Farhan', handle: 'gUBII',          initial: 'F', email: 'farhan@devfleet.local', photo: '/avatars/farhan.png' },
+  { id: 'hasan',  name: 'Hasan',  handle: 'genesisprime01',  initial: 'H', email: 'hasan@devfleet.local',  photo: '/avatars/hasan.png' },
+  { id: 'adil',   name: 'Adil',   handle: 'mugdho080',       initial: 'A', email: 'adil@devfleet.local',   photo: '/avatars/adil.png' },
 ];
 
 export default function Login({ navigate }) {
@@ -51,11 +51,14 @@ export default function Login({ navigate }) {
               onClick={() => handleSelect(m.id)}
               type="button"
             >
-              <div
-                className="auth-member-avatar"
-                style={m.photo ? { backgroundImage: `url(${m.photo})`, backgroundSize: 'cover' } : {}}
-              >
-                {!m.photo && <span>{m.initial}</span>}
+              <div className="auth-member-avatar">
+                <img
+                  src={m.photo}
+                  alt={m.name}
+                  className="auth-member-photo"
+                  onError={e => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'flex'; }}
+                />
+                <span className="auth-member-initial" style={{ display: 'none' }}>{m.initial}</span>
               </div>
               <div className="auth-member-name">{m.name}</div>
               <div className="auth-member-handle">@{m.handle}</div>

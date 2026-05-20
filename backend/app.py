@@ -136,25 +136,55 @@ app.add_middleware(
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as _StarletteRequest
 
+# MCP API key — required for external /mcp and /messages access
+_MCP_API_KEY = os.environ.get("DEVFLEET_MCP_KEY", "")
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)
+
 
 class AuthMiddleware(BaseHTTPMiddleware):
     _PUBLIC_EXACT = {"/api/auth/login", "/api/auth/register"}
-    _PUBLIC_PREFIXES = ("/mcp", "/messages", "/api/status")
+    _PUBLIC_STATUS = ("/api/status",)
 
     async def dispatch(self, request: _StarletteRequest, call_next):
         if request.method == "OPTIONS":
             return await call_next(request)
         path = request.url.path
-        if path in self._PUBLIC_EXACT or any(path.startswith(p) for p in self._PUBLIC_PREFIXES):
+
+        # Public exact routes (login/register)
+        if path in self._PUBLIC_EXACT or any(path.startswith(p) for p in self._PUBLIC_STATUS):
             return await call_next(request)
+
+        # MCP routes: require MCP key OR a valid JWT
+        if path.startswith("/mcp") or path.startswith("/messages"):
+            from jose import JWTError as _JWTError
+            mcp_key_header = request.headers.get("x-mcp-key", "")
+            if _MCP_API_KEY and mcp_key_header == _MCP_API_KEY:
+                return await call_next(request)
+            # Fall through to JWT check below
+            auth_h = request.headers.get("authorization", "")
+            raw = auth_h[7:] if auth_h.startswith("Bearer ") else request.query_params.get("token")
+            if not raw:
+                return JSONResponse({"detail": "MCP access requires X-MCP-Key or Bearer token"}, status_code=401)
+            try:
+                from auth import decode_token as _dt
+                request.state.user = _dt(raw)
+            except _JWTError:
+                return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+            return await call_next(request)
+
         if path.startswith("/api/"):
             from jose import JWTError as _JWTError
-            raw = None
             auth_h = request.headers.get("authorization", "")
-            if auth_h.startswith("Bearer "):
-                raw = auth_h[7:]
-            else:
-                raw = request.query_params.get("token")
+            raw = auth_h[7:] if auth_h.startswith("Bearer ") else request.query_params.get("token")
             if not raw:
                 return JSONResponse({"detail": "Authentication required"}, status_code=401)
             try:
@@ -166,6 +196,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(AuthMiddleware)
+
+# ── Rate limiting (C3 fix) ───────────────────────────────────────────────────
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+_limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = _limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 MAX_CONCURRENT_AGENTS = int(os.environ.get("DEVFLEET_MAX_AGENTS", "0"))  # 0 = defer to lane system
 
@@ -287,7 +326,8 @@ app.mount("/mcp", Mount(path="", routes=[
 from models import UserCreate, UserLogin
 
 @app.post("/api/auth/login")
-async def auth_login(body: UserLogin):
+@_limiter.limit("5/minute")
+async def auth_login(request: Request, body: UserLogin):
     from auth import get_user_by_email, verify_password, create_access_token
     user = await get_user_by_email(body.email)
     if not user or not verify_password(body.password, user["password_hash"]):
@@ -304,7 +344,8 @@ async def auth_login(body: UserLogin):
 
 
 @app.post("/api/auth/register")
-async def auth_register(body: UserCreate):
+@_limiter.limit("5/minute")
+async def auth_register(request: Request, body: UserCreate):
     from auth import get_user_by_email, create_user, consume_invite_token, create_access_token
     if await get_user_by_email(body.email):
         raise HTTPException(400, "Email already registered")
@@ -2241,8 +2282,11 @@ async def system_status():
 
 
 @app.patch("/api/system/ceiling")
-async def set_ceiling(body: dict):
-    """Set the global agent ceiling at runtime. 0 = no cap (defer to lane limits)."""
+async def set_ceiling(request: Request, body: dict):
+    """Set the global agent ceiling at runtime. Admin only."""
+    _u = getattr(request.state, "user", None)
+    if not _u or _u.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
     global MAX_CONCURRENT_AGENTS
     val = body.get("max_agents")
     if not isinstance(val, int) or val < 0:

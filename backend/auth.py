@@ -11,14 +11,16 @@ import db
 
 log = logging.getLogger("devfleet")
 
-SECRET_KEY = os.environ.get("DEVFLEET_JWT_SECRET", "change-me-in-production")
+SECRET_KEY = os.environ.get("DEVFLEET_JWT_SECRET")
+if not SECRET_KEY:
+    raise RuntimeError(
+        "DEVFLEET_JWT_SECRET must be set — refusing to start without a secret key. "
+        "Generate one with: openssl rand -hex 32"
+    )
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
 
 _pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-if SECRET_KEY == "change-me-in-production":
-    log.warning("DEVFLEET_JWT_SECRET is default — set a strong secret before exposing to internet")
 
 
 def hash_password(plain: str) -> str:
