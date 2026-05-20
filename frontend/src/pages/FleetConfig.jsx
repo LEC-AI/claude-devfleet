@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
+import { getSystemStatus, setGlobalCeiling } from '../api/client';
 
 const MODELS = [
   'claude-sonnet-4-6',
@@ -105,19 +106,67 @@ function LaneEditor({ lane, onSave, onClose }) {
   );
 }
 
+const CEILING_PRESETS = [0, 1, 2, 3, 4, 6, 8, 12, 18];
+
+function CeilingPicker({ ceiling, onChange }) {
+  const [saving, setSaving] = useState(false);
+
+  const pick = async (n) => {
+    setSaving(true);
+    try {
+      await setGlobalCeiling(n);
+      onChange(n);
+    } catch (e) {
+      console.error('Failed to set ceiling', e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="ceiling-picker-section">
+      <div className="ceiling-picker-label">
+        <span className="ceiling-title">Global Agent Ceiling</span>
+        <span className="ceiling-hint">
+          {ceiling === 0
+            ? 'Off — each lane enforces its own cap'
+            : `Hard cap: max ${ceiling} agent${ceiling === 1 ? '' : 's'} running at once across all lanes`}
+        </span>
+      </div>
+      <div className="ceiling-btn-row">
+        {CEILING_PRESETS.map(n => (
+          <button
+            key={n}
+            className={`ceiling-btn ${ceiling === n ? 'active' : ''}`}
+            onClick={() => pick(n)}
+            disabled={saving}
+            title={n === 0 ? 'No global cap' : `Max ${n} agents`}
+          >
+            {n === 0 ? 'Off' : n}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function FleetConfig() {
   const [lanes, setLanes] = useState([]);
+  const [ceiling, setCeiling] = useState(0);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/lanes');
-      const data = await res.json();
-      setLanes(data);
+      const [lanesRes, statusRes] = await Promise.all([
+        fetch('/api/lanes').then(r => r.json()),
+        getSystemStatus(),
+      ]);
+      setLanes(lanesRes);
+      setCeiling(statusRes.max_agents ?? 0);
     } catch (e) {
-      console.error('Failed to load lanes', e);
+      console.error('Failed to load fleet config', e);
     } finally {
       setLoading(false);
     }
@@ -142,6 +191,8 @@ export default function FleetConfig() {
           <p className="subtitle">{lanes.length} lanes · {totalSlots} total slots · click any lane to edit its prompt and capacity</p>
         </div>
       </div>
+
+      <CeilingPicker ceiling={ceiling} onChange={setCeiling} />
 
       <div className="lane-grid">
         {lanes.map(lane => (

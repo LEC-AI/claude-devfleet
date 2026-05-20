@@ -1561,6 +1561,74 @@ body {
   margin: 0 0 4px;
 }
 
+/* ── Global Ceiling Picker ── */
+.ceiling-picker-section {
+  background: var(--bg-elevated, #1a1a24);
+  border: 1px solid var(--border, #2a2a3a);
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin-bottom: 28px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.ceiling-picker-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 200px;
+}
+
+.ceiling-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ceiling-hint {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.ceiling-btn-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ceiling-btn {
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #2a2a3a);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+  min-width: 38px;
+}
+
+.ceiling-btn:hover:not(:disabled) {
+  border-color: #58a6ff;
+  color: #58a6ff;
+}
+
+.ceiling-btn.active {
+  background: #58a6ff22;
+  border-color: #58a6ff;
+  color: #58a6ff;
+  font-weight: 700;
+}
+
+.ceiling-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── (existing) ── */
 .fleet-config-header .subtitle {
   color: var(--text-secondary);
   font-size: 0.875rem;

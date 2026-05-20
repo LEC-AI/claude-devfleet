@@ -2076,6 +2076,18 @@ async def system_status():
     }
 
 
+@app.patch("/api/system/ceiling")
+async def set_ceiling(body: dict):
+    """Set the global agent ceiling at runtime. 0 = no cap (defer to lane limits)."""
+    global MAX_CONCURRENT_AGENTS
+    val = body.get("max_agents")
+    if not isinstance(val, int) or val < 0:
+        raise HTTPException(400, "max_agents must be a non-negative integer")
+    MAX_CONCURRENT_AGENTS = val
+    running_count = sum(1 for t in running_tasks.values() if not t.done())
+    return {"max_agents": MAX_CONCURRENT_AGENTS, "running_agents": running_count}
+
+
 @app.get("/api/system/features")
 async def system_features():
     """Get enabled features."""

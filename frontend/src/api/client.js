@@ -178,6 +178,8 @@ export const getMissionTypes = () => request('/config/mission-types');
 // ── System Status ──
 export const getSystemStatus = () => request('/system/status');
 export const getSystemFeatures = () => request('/system/features');
+export const setGlobalCeiling = (n) =>
+  request('/system/ceiling', { method: 'PATCH', body: JSON.stringify({ max_agents: n }) });
 
 // ── MCP Servers ──
 export const listMcpServers = (projectId) => request(`/projects/${projectId}/mcp-servers`);

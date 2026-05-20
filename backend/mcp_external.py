@@ -389,7 +389,7 @@ async def _dispatch_mission(args: dict, conn) -> dict:
         return {"error": f"Dispatch blocked: {reason}"}
 
     running_count = sum(1 for t in running_tasks.values() if not t.done())
-    if running_count >= MAX_CONCURRENT_AGENTS:
+    if MAX_CONCURRENT_AGENTS > 0 and running_count >= MAX_CONCURRENT_AGENTS:
         return {"error": f"Global agent ceiling reached ({running_count}/{MAX_CONCURRENT_AGENTS}). Wait for a slot to free."}
 
     # Get last report for context (matches app.py flow)
