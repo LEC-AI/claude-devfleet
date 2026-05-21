@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { listLanes, listMissions, listSessions, getDashboardStats, getLanesStudioSummary } from '../api/client';
+import { listLanes, listMissions, listSessions, getDashboardStats, getLanesStudioSummary, getSystemStatus } from '../api/client';
+import TunnelStatus from '../components/TunnelStatus';
 
 const _API_BASE = (import.meta.env.VITE_API_URL || '') + '/api';
 
@@ -40,6 +41,7 @@ export default function Dashboard({ navigate }) {
   const [missions, setMissions]     = useState([]);
   const [sessions, setSessions]     = useState([]);
   const [studioSummary, setStudio]  = useState(null);
+  const [tunnel, setTunnel]         = useState(null);
   const [clock, setClock]           = useState('');
   const [error, setError]           = useState(null);
 
@@ -51,18 +53,20 @@ export default function Dashboard({ navigate }) {
 
   const load = useCallback(async () => {
     try {
-      const [sum, lns, mis, ses, studio] = await Promise.all([
+      const [sum, lns, mis, ses, studio, sys] = await Promise.all([
         getDashboardStats(),
         listLanes(),
         listMissions(),
         listSessions(),
         getLanesStudioSummary().catch(() => null),
+        getSystemStatus().catch(() => null),
       ]);
       setSummary(sum);
       setLanes(Array.isArray(lns) ? lns : []);
       setMissions(Array.isArray(mis) ? mis : []);
       setSessions(Array.isArray(ses) ? ses : []);
       setStudio(studio);
+      setTunnel(sys?.tunnel ?? null);
       setError(null);
     } catch (e) {
       setError(e.message);
@@ -112,9 +116,23 @@ export default function Dashboard({ navigate }) {
             </span>
             <span className="dash-pill-sep">·</span>
             <span className="dash-pill"><b>{fmt(costTotal)}</b> total spend</span>
+            {tunnel && (
+              <>
+                <span className="dash-pill-sep">·</span>
+                <span className="dash-pill" style={{ color: tunnel.connected ? '#3fb950' : '#f85149' }}>
+                  <span style={{ marginRight: 4 }}>{tunnel.connected ? '⬤' : '○'}</span>
+                  {tunnel.connected
+                    ? <a href={tunnel.url} target="_blank" rel="noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}>tunnel live</a>
+                    : 'tunnel down'}
+                </span>
+              </>
+            )}
           </div>
         </div>
       </div>
+
+      {/* ── Tunnel status ── */}
+      <TunnelStatus tunnel={tunnel} />
 
       {/* ── Active agents alert ── */}
       {running.length > 0 && (
