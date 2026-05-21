@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 from pydantic import BaseModel
 
 import db
@@ -2317,3 +2319,28 @@ async def system_features():
     return {
         "remote_control": ENABLE_REMOTE_CONTROL,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Frontend SPA serving — must be registered LAST so /api/* routes take precedence
+# ──────────────────────────────────────────────────────────────────────────────
+_FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+
+if _FRONTEND_DIST.is_dir():
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def spa_fallback(full_path: str):
+        """Serve index.html for all non-API client-side routes (React Router fallback)."""
+        if full_path.startswith("api/") or full_path.startswith("mcp"):
+            raise HTTPException(404, "Not Found")
+        candidate = _FRONTEND_DIST / full_path
+        if candidate.is_file() and not candidate.is_symlink():
+            try:
+                candidate.resolve().relative_to(_FRONTEND_DIST.resolve())
+                return FileResponse(candidate)
+            except ValueError:
+                pass
+        return FileResponse(_FRONTEND_DIST / "index.html")
+else:
+    log.warning("Frontend dist not found at %s — skipping SPA mount (run `npm run build` in frontend/)", _FRONTEND_DIST)
