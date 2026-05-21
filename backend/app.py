@@ -152,8 +152,15 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: _StarletteRequest, call_next):
-        # Auth disabled for local access — inject admin user so GitHub tokens still resolve
-        request.state.user = {"sub": "7bdd061a-8354-4f73-8798-9421b9d9b84d", "email": "farhan@devfleet.local", "role": "admin"}
+        request.state.user = None
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            try:
+                from auth import decode_token
+                request.state.user = decode_token(token)
+            except Exception:
+                pass  # Invalid/expired token → user stays None; endpoint decides if it cares
         return await call_next(request)
 
 
