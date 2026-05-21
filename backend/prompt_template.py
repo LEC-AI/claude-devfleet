@@ -32,6 +32,8 @@ def build_prompt(mission: dict, last_report: dict | None = None) -> str:
             "Address any open items, untested areas, and errors from the previous session first.",
         ]
 
+    owner = (mission.get("created_by_name") or "Farhan").strip().capitalize()
+
     parts += [
         "",
         "## Git Rebase Discipline (MANDATORY)",
@@ -64,13 +66,13 @@ def build_prompt(mission: dict, last_report: dict | None = None) -> str:
         "Every commit you make in this repo must follow the owner's style exactly:",
         "",
         "**Prefix format** — pick the right one:",
-        "- `Farhanfeat(scope):` — new feature or capability",
-        "- `Farhanfix(scope):` — bug fix",
-        "- `Farhanupdate(scope):` — update or enhancement to existing code",
-        "- `Farhanrefactor(scope):` — refactor with no behaviour change",
-        "- `Farhantest(scope):` — tests added or updated",
-        "- `Farhanchore(scope):` — deps, config, tooling, CI",
-        "- `Farhanchore(sync):` — branch sync commits",
+        f"- `{owner}feat(scope):` — new feature or capability",
+        f"- `{owner}fix(scope):` — bug fix",
+        f"- `{owner}update(scope):` — update or enhancement to existing code",
+        f"- `{owner}refactor(scope):` — refactor with no behaviour change",
+        f"- `{owner}test(scope):` — tests added or updated",
+        f"- `{owner}chore(scope):` — deps, config, tooling, CI",
+        f"- `{owner}chore(sync):` — branch sync commits",
         "",
         "**Body** — describe what was done to the code. Be specific: mention function names,",
         "endpoints, component names, what changed and why. One sentence minimum.",
@@ -84,7 +86,7 @@ def build_prompt(mission: dict, last_report: dict | None = None) -> str:
         "**Example — correct:**",
         "```",
         "git commit -m \"$(cat <<'EOF'",
-        "Farhanfeat(api): add GET /coordinator/shifts/:shiftId/tasks endpoint",
+        f"{owner}feat(api): add GET /coordinator/shifts/:shiftId/tasks endpoint",
         "",
         "Returns paginated task rows with checklist aggregation. Filters by",
         "orgId + shiftId + relatedType=SHIFT. Uses requireShiftParticipantAccess",
@@ -104,7 +106,7 @@ def build_prompt(mission: dict, last_report: dict | None = None) -> str:
         "Commit your code FIRST, then run the typecheck. If the typecheck fails, amend the commit.",
         "This preserves your work even if the validator hangs or the session is interrupted.",
         "```bash",
-        "git add <files> && git commit -m 'Farhanfeat(...): ...'  # commit first",
+        f"git add <files> && git commit -m '{owner}feat(...): ...'  # commit first",
         "timeout 300 pnpm --filter @package/name exec tsc --noEmit  # then validate",
         "```",
         "",

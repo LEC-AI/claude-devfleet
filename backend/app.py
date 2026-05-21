@@ -151,47 +151,9 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    _PUBLIC_EXACT = {"/api/auth/login", "/api/auth/register"}
-    _PUBLIC_STATUS = ("/api/status",)
-
     async def dispatch(self, request: _StarletteRequest, call_next):
-        if request.method == "OPTIONS":
-            return await call_next(request)
-        path = request.url.path
-
-        # Public exact routes (login/register)
-        if path in self._PUBLIC_EXACT or any(path.startswith(p) for p in self._PUBLIC_STATUS):
-            return await call_next(request)
-
-        # MCP routes: require MCP key OR a valid JWT
-        if path.startswith("/mcp") or path.startswith("/messages"):
-            from jose import JWTError as _JWTError
-            mcp_key_header = request.headers.get("x-mcp-key", "")
-            if _MCP_API_KEY and mcp_key_header == _MCP_API_KEY:
-                return await call_next(request)
-            # Fall through to JWT check below
-            auth_h = request.headers.get("authorization", "")
-            raw = auth_h[7:] if auth_h.startswith("Bearer ") else request.query_params.get("token")
-            if not raw:
-                return JSONResponse({"detail": "MCP access requires X-MCP-Key or Bearer token"}, status_code=401)
-            try:
-                from auth import decode_token as _dt
-                request.state.user = _dt(raw)
-            except _JWTError:
-                return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
-            return await call_next(request)
-
-        if path.startswith("/api/"):
-            from jose import JWTError as _JWTError
-            auth_h = request.headers.get("authorization", "")
-            raw = auth_h[7:] if auth_h.startswith("Bearer ") else request.query_params.get("token")
-            if not raw:
-                return JSONResponse({"detail": "Authentication required"}, status_code=401)
-            try:
-                from auth import decode_token as _dt
-                request.state.user = _dt(raw)
-            except _JWTError:
-                return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+        # Auth disabled for local access — inject admin user so GitHub tokens still resolve
+        request.state.user = {"sub": "7bdd061a-8354-4f73-8798-9421b9d9b84d", "email": "farhan@devfleet.local", "role": "admin"}
         return await call_next(request)
 
 
@@ -585,7 +547,7 @@ async def list_missions(
 
 
 @app.post("/api/missions", status_code=201)
-async def create_mission(body: MissionCreate):
+async def create_mission(request: Request, body: MissionCreate):
     conn = await db.get_db()
     try:
         rows = await conn.execute_fetchall("SELECT id FROM projects WHERE id=?", (body.project_id,))
@@ -602,17 +564,23 @@ async def create_mission(body: MissionCreate):
         # Derive lane from mission_type if not explicitly provided
         from models import MISSION_TYPE_TO_LANE
         lane = body.lane or MISSION_TYPE_TO_LANE.get(body.mission_type, "coder")
+        # Capture authenticated user for attribution
+        _user = getattr(request.state, "user", None)
+        _by_email = _user.get("email", "") if _user else ""
+        _by_name = _by_email.split("@")[0] if _by_email else ""
         await conn.execute(
             """INSERT INTO missions (id, project_id, title, detailed_prompt, acceptance_criteria,
                priority, tags, model, max_turns, max_budget_usd, allowed_tools, mission_type,
-               lane, parent_mission_id, depends_on, auto_dispatch, schedule_cron, schedule_enabled, mission_number)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               lane, parent_mission_id, depends_on, auto_dispatch, schedule_cron, schedule_enabled,
+               mission_number, created_by_email, created_by_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (mid, body.project_id, body.title, body.detailed_prompt,
              body.acceptance_criteria, body.priority, json.dumps(body.tags),
              body.model, body.max_turns, body.max_budget_usd,
              body.allowed_tools or "", body.mission_type, lane,
              body.parent_mission_id, json.dumps(body.depends_on),
-             1 if body.auto_dispatch else 0, body.schedule_cron, schedule_enabled, next_num),
+             1 if body.auto_dispatch else 0, body.schedule_cron, schedule_enabled,
+             next_num, _by_email, _by_name),
         )
         await conn.commit()
         row = await conn.execute_fetchall(

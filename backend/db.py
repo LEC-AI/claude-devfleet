@@ -246,6 +246,9 @@ async def init_db():
             "ALTER TABLE agent_sessions ADD COLUMN branch_name TEXT DEFAULT ''",
             # v8: online auth
             "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'",
+            # v9: per-user mission attribution
+            "ALTER TABLE missions ADD COLUMN created_by_email TEXT DEFAULT ''",
+            "ALTER TABLE missions ADD COLUMN created_by_name TEXT DEFAULT ''",
         ]
         for migration in migrations:
             try:

@@ -53,6 +53,13 @@ export default function MissionCard({ mission, onClick }) {
         <div className="mission-card-meta">
           <span>{mission.project_name}</span>
           <span>{timeAgo(mission.updated_at || mission.created_at)}</span>
+          {mission.created_by_email && (
+            <span style={{
+              fontSize: 9, fontWeight: 600, padding: '1px 5px',
+              background: 'rgba(180,79,247,0.1)', color: '#b44ff7',
+              borderRadius: 'var(--radius-full)', fontFamily: 'var(--font-mono)',
+            }}>@{mission.created_by_email.split('@')[0]}</span>
+          )}
           {isAutoDispatch && (
             <span style={{
               fontSize: 9, fontWeight: 700, padding: '1px 5px',

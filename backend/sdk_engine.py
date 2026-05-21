@@ -284,6 +284,8 @@ async def _build_sdk_options(
         "DEVFLEET_PROJECT_ID": mission.get("project_id", ""),
         "DEVFLEET_SESSION_ID": session_id,
         "DEVFLEET_REPORT_DIR": os.path.join(backend_dir, "..", "data", "reports"),
+        "DEVFLEET_USER_EMAIL": mission.get("created_by_email", ""),
+        "DEVFLEET_USER_NAME": mission.get("created_by_name", ""),
     }
     if github_token:
         mcp_env["GITHUB_TOKEN"] = github_token
@@ -347,6 +349,16 @@ async def _build_sdk_options(
         ]
     }
 
+    # Per-user git identity — agents commit as the mission creator, not the machine owner
+    _creator_name = (mission.get("created_by_name") or "DevFleet").strip().capitalize()
+    _creator_email = mission.get("created_by_email") or "agent@devfleet.local"
+    _git_env = {
+        "GIT_AUTHOR_NAME": _creator_name,
+        "GIT_AUTHOR_EMAIL": _creator_email,
+        "GIT_COMMITTER_NAME": _creator_name,
+        "GIT_COMMITTER_EMAIL": _creator_email,
+    }
+
     kwargs = dict(
         model=model,
         max_turns=max_turns,
@@ -357,6 +369,7 @@ async def _build_sdk_options(
         resume=resume_session_id,
         include_partial_messages=False,
         hooks=stop_hooks,
+        env={**os.environ, **_git_env},
     )
     if mcp_servers:
         kwargs["mcp_servers"] = mcp_servers
