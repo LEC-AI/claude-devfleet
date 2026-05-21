@@ -128,6 +128,13 @@ if [ -z "$UV" ]; then
   UV="$HOME/.local/bin/uv"
 fi
 
+# Load .env if present (JWT secret, custom config)
+if [ -f "$SCRIPT_DIR/.env" ]; then
+  set -a
+  source "$SCRIPT_DIR/.env"
+  set +a
+fi
+
 echo "  Setting up backend venv..."
 cd backend
 [ ! -d .venv ] && "$UV" venv .venv
