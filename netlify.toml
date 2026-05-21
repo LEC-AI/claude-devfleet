@@ -8,6 +8,15 @@
   # Set VITE_API_URL in Netlify dashboard:
   # Site settings → Environment variables → VITE_API_URL = https://devfleet.yourdomain.com
 
+# API proxy — Netlify forwards /api/* to the backend server-side
+# Update the `to` URL when the backend moves (Railway, ngrok, etc.)
+[[redirects]]
+  from = "/api/*"
+  to = "https://farhanfleet.nexis365.com.au/api/:splat"
+  status = 200
+  force = true
+
+# SPA fallback — must come after the API proxy
 [[redirects]]
   from = "/*"
   to = "/index.html"

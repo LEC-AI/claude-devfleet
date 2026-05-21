@@ -174,6 +174,39 @@ async def _reap_stuck_sessions():
             finally:
                 await conn2.close()
 
+    # ── Reap abandoned remote sessions ──────────────────────────────────────────
+    remote_timeout_hours = int(os.environ.get("DEVFLEET_REMOTE_TIMEOUT_HOURS", "2"))
+    conn3 = await db.get_db()
+    try:
+        ghost_remotes = await conn3.execute_fetchall(
+            """SELECT s.id, s.mission_id FROM agent_sessions s
+               WHERE s.status = 'remote'
+                 AND s.last_activity_at IS NULL
+                 AND s.started_at < datetime('now', ? || ' hours')""",
+            (f"-{remote_timeout_hours}",),
+        )
+    finally:
+        await conn3.close()
+
+    for row in ghost_remotes:
+        conn4 = await db.get_db()
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            await conn4.execute(
+                "UPDATE agent_sessions SET status='cancelled', ended_at=?, "
+                "error_log='Remote session abandoned — auto-expired after ' || ? || 'h with no activity' "
+                "WHERE id=?",
+                (now, str(remote_timeout_hours), row["id"]),
+            )
+            await conn4.execute(
+                "UPDATE missions SET status='failed', updated_at=? WHERE id=? AND status='running'",
+                (now, row["mission_id"]),
+            )
+            await conn4.commit()
+            log.warning("Reaped ghost remote session %s (no activity, >%dh old)", row["id"], remote_timeout_hours)
+        finally:
+            await conn4.close()
+
 
 async def _watch_loop():
     """Main polling loop — find and dispatch eligible missions, reap stuck sessions."""
