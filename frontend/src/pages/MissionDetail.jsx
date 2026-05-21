@@ -65,7 +65,18 @@ export default function MissionDetail({ id, navigate }) {
     }
   };
 
-  useEffect(() => { load(); }, [id]);
+  useEffect(() => {
+    load();
+    // Poll while running so status transitions reflect without a page reload
+    const interval = setInterval(() => {
+      if (mission && (mission.status === 'completed' || mission.status === 'failed' || mission.status === 'interrupted')) {
+        clearInterval(interval);
+        return;
+      }
+      load();
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [id]);
 
   useEffect(() => {
     getSystemFeatures().then(features => {
@@ -168,6 +179,7 @@ export default function MissionDetail({ id, navigate }) {
 
   const canEdit = mission.status !== 'running';
   const canDispatch = mission.status !== 'running';
+  const runningSession = mission.sessions?.find(s => s.status === 'running');
 
   return (
     <div>
@@ -202,6 +214,11 @@ export default function MissionDetail({ id, navigate }) {
           </div>
         </div>
         <div className="flex gap-8">
+          {runningSession && !editing && (
+            <button className="btn btn-success" onClick={() => navigate('live', runningSession.id)}>
+              ▶ View Live
+            </button>
+          )}
           {canEdit && !editing && (
             <button className="btn btn-ghost" onClick={() => setEditing(true)}>Edit</button>
           )}

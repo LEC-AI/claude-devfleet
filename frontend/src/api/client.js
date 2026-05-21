@@ -72,7 +72,7 @@ export const cancelSession = (id) => request(`/sessions/${id}/cancel`, { method:
 // ── SSE streaming for live agent output ──
 export function streamSession(sessionId, { onEvent, onBackfill, onDone, onError }) {
   const _tok = localStorage.getItem('devfleet_token') || '';
-  const evtSource = new EventSource(`${API}/sessions/${sessionId}/stream?token=${_tok}`);
+  const evtSource = new EventSource(`${API}/sessions/${sessionId}/stream?token=${_tok}&ngrok-skip-browser-warning=1`);
 
   evtSource.onmessage = (e) => {
     try {
@@ -141,7 +141,7 @@ export const getAutoLoopStatus = (projectId) =>
 // ── Remote Control ──
 export function streamRemoteSession(sessionId, { onText, onBackfill, onDone, onError }) {
   const _rtok = localStorage.getItem('devfleet_token') || '';
-  const evtSource = new EventSource(`${API}/sessions/${sessionId}/remote-stream?token=${_rtok}`);
+  const evtSource = new EventSource(`${API}/sessions/${sessionId}/remote-stream?token=${_rtok}&ngrok-skip-browser-warning=1`);
 
   evtSource.onmessage = (e) => {
     try {
@@ -264,7 +264,7 @@ export const listUsers = () => request('/auth/users');
 // ── Global Fleet Events SSE ───────────────────────────────────────────────────
 export function streamFleetEvents({ onEvent, onError }) {
   const token = localStorage.getItem('devfleet_token') || '';
-  const evtSource = new EventSource(`${API}/events?token=${token}`);
+  const evtSource = new EventSource(`${API}/events?token=${token}&ngrok-skip-browser-warning=1`);
   evtSource.onmessage = (e) => { try { onEvent?.(JSON.parse(e.data)); } catch {} };
   evtSource.onerror = (e) => { onError?.(e); };
   return () => evtSource.close();

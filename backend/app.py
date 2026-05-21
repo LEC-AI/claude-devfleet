@@ -1191,7 +1191,14 @@ async def dashboard_stats():
         missions_by_status = await conn.execute_fetchall(
             "SELECT status, COUNT(*) AS c FROM missions GROUP BY status"
         )
-        running_agents = sum(1 for t in running_tasks.values() if not t.done())
+        # Use DB as source of truth — in-memory running_tasks loses sessions on restart
+        db_running = await conn.execute_fetchall(
+            "SELECT COUNT(*) AS c FROM agent_sessions WHERE status = 'running'"
+        )
+        running_agents = max(
+            sum(1 for t in running_tasks.values() if not t.done()),
+            dict(db_running[0])["c"] if db_running else 0
+        )
         recent_reports = await conn.execute_fetchall(
             """SELECT r.id, r.created_at, r.what_done, r.what_open,
                       m.title AS mission_title, p.name AS project_name
