@@ -2327,10 +2327,14 @@ def _tunnel_status() -> dict:
 @app.get("/api/system/status")
 async def system_status():
     """Get system-wide status: watcher, scheduler, running agents, tunnel."""
+    from lanes import total_capacity as lane_total_capacity
     running_count = sum(1 for t in running_tasks.values() if not t.done())
+    total_slots = lane_total_capacity()
     return {
         "running_agents": running_count,
         "max_agents": MAX_CONCURRENT_AGENTS,
+        "total_slots": total_slots,
+        "free_slots": max(0, total_slots - running_count),
         "engine": "sdk" if USE_SDK_ENGINE else "cli",
         "mission_watcher": mission_watcher.get_watcher_status(),
         "scheduler": scheduler.get_scheduler_status(),
