@@ -28,7 +28,7 @@ def test_derive_lane_from_mission_type():
     assert lanes.derive_lane({"mission_type": "test"}) == "tester"
     assert lanes.derive_lane({"mission_type": "review"}) == "reviewer"
     assert lanes.derive_lane({"mission_type": "explore"}) == "explorer"
-    assert lanes.derive_lane({"mission_type": "planner"}) == "planner"
+    assert lanes.derive_lane({"mission_type": "planner"}) == "orchestrator"
 
 
 @pytest.mark.unit
@@ -54,8 +54,11 @@ def test_derive_lane_empty_string_falls_through():
 
 
 @pytest.mark.unit
-def test_lane_defaults_has_five_lanes():
-    assert set(LANE_DEFAULTS.keys()) == {"coder", "reviewer", "tester", "planner", "explorer"}
+def test_lane_defaults_has_ten_lanes():
+    assert set(LANE_DEFAULTS.keys()) == {
+        "orchestrator", "coder", "reviewer", "security", "tester",
+        "e2e", "qa", "dynamic_tester", "researcher", "explorer",
+    }
 
 
 @pytest.mark.unit
@@ -147,12 +150,12 @@ async def test_check_slot_full(tmp_db):
     lanes._cache.clear()
     await lanes.reload_cache()
 
-    # Coder max_agents=2; simulate 2 already running
-    with patch.object(lanes, "running_by_lane", return_value={"coder": 2}):
+    # Coder max_agents=3; simulate 3 already running
+    with patch.object(lanes, "running_by_lane", return_value={"coder": 3}):
         ok, reason = await lanes.check_slot({"lane": "coder"})
     assert ok is False
     assert "coder" in reason.lower()
-    assert "2/2" in reason
+    assert "3/3" in reason
 
 
 @pytest.mark.asyncio
@@ -161,8 +164,8 @@ async def test_check_slot_other_lane_full_does_not_block(tmp_db):
     lanes._cache.clear()
     await lanes.reload_cache()
 
-    # Reviewer is full; coder is free
-    with patch.object(lanes, "running_by_lane", return_value={"reviewer": 1}):
+    # Reviewer is full (cap=2); coder is free
+    with patch.object(lanes, "running_by_lane", return_value={"reviewer": 2}):
         ok, _ = await lanes.check_slot({"lane": "coder"})
     assert ok is True
 
@@ -179,10 +182,10 @@ async def test_free_slots_returns_available(tmp_db):
     with patch.object(lanes, "running_by_lane", return_value={"coder": 1}):
         free = await lanes.free_slots()
 
-    # coder has cap 2, 1 running → 1 free
-    assert free.get("coder") == 1
-    # reviewer has cap 1, 0 running → 1 free
-    assert free.get("reviewer") == 1
+    # coder has cap 3, 1 running → 2 free
+    assert free.get("coder") == 2
+    # reviewer has cap 2, 0 running → 2 free
+    assert free.get("reviewer") == 2
 
 
 @pytest.mark.asyncio
@@ -191,8 +194,8 @@ async def test_free_slots_excludes_saturated_lanes(tmp_db):
     lanes._cache.clear()
     await lanes.reload_cache()
 
-    # Saturate reviewer (cap=1)
-    with patch.object(lanes, "running_by_lane", return_value={"reviewer": 1}):
+    # Saturate reviewer (cap=2)
+    with patch.object(lanes, "running_by_lane", return_value={"reviewer": 2}):
         free = await lanes.free_slots()
 
     assert "reviewer" not in free
@@ -220,7 +223,7 @@ async def test_snapshot_structure(tmp_db):
     with patch.object(lanes, "running_by_lane", return_value={"coder": 1}):
         result = await lanes.snapshot()
 
-    assert len(result) == 5
+    assert len(result) == len(LANE_DEFAULTS)
     names = [r["name"] for r in result]
     assert "coder" in names
     coder = next(r for r in result if r["name"] == "coder")
@@ -243,7 +246,7 @@ async def test_init_db_seeds_lanes(tmp_db):
         names = {r["name"] for r in rows}
     finally:
         await conn.close()
-    assert names == {"coder", "reviewer", "tester", "planner", "explorer"}
+    assert names == set(LANE_DEFAULTS.keys())
 
 
 @pytest.mark.asyncio
@@ -263,7 +266,7 @@ async def test_update_lane_persists(tmp_db):
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_watcher_fairness(tmp_db):
-    """With coder cap=2 and 5 coder drafts, at most 2 get dispatched per cycle."""
+    """With coder cap=3 and 5 coder drafts, at most 3 get dispatched per cycle."""
     import db as _db
     import uuid
 
@@ -288,14 +291,15 @@ async def test_watcher_fairness(tmp_db):
     await conn.commit()
     await conn.close()
 
-    # Check that free_slots returns at most cap=2 for coder
+    # Check that free_slots returns at most coder cap for coder
+    coder_cap = LANE_DEFAULTS["coder"]["max_agents"]
     lanes._cache.clear()
     await lanes.reload_cache()
     with patch.object(lanes, "running_by_lane", return_value={}):
         free = await lanes.free_slots()
-    assert free.get("coder") == 2  # cap is 2
+    assert free.get("coder") == coder_cap
 
-    # Simulate 2 dispatched
-    with patch.object(lanes, "running_by_lane", return_value={"coder": 2}):
+    # Simulate coder saturated
+    with patch.object(lanes, "running_by_lane", return_value={"coder": coder_cap}):
         free_after = await lanes.free_slots()
     assert "coder" not in free_after  # coder saturated

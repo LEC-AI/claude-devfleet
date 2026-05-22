@@ -11,6 +11,10 @@ import pytest_asyncio
 # Ensure backend/ is importable
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+# Required env vars must be set BEFORE importing auth/app modules anywhere
+os.environ.setdefault("DEVFLEET_JWT_SECRET", "test-secret-do-not-use-in-prod-only-for-pytest")
+os.environ.setdefault("DEVFLEET_ALLOWED_ORIGINS", "*")
+
 
 @pytest.fixture(scope="session")
 def event_loop():
