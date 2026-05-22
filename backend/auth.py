@@ -22,6 +22,10 @@ ACCESS_TOKEN_EXPIRE_HOURS = 24
 
 _pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# Precomputed at startup so login timing is constant whether the email exists or not.
+# Used by verify_password when the user lookup returns None.
+DUMMY_HASH = _pwd.hash("__devfleet_dummy_password_for_constant_time__")
+
 
 def hash_password(plain: str) -> str:
     if len(plain.encode("utf-8")) > 72:
@@ -29,7 +33,12 @@ def hash_password(plain: str) -> str:
     return _pwd.hash(plain)
 
 
-def verify_password(plain: str, hashed: str) -> bool:
+def verify_password(plain: str, hashed: str | None) -> bool:
+    """Verify a password. If hashed is None/empty, runs bcrypt against a dummy
+    hash to preserve constant-time behavior, then returns False."""
+    if not hashed:
+        _pwd.verify(plain, DUMMY_HASH)
+        return False
     return _pwd.verify(plain, hashed)
 
 

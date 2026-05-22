@@ -456,3 +456,10 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserOut
+
+
+# ── System Models ────────────────────────────────────────────────────────────
+
+class CeilingUpdate(BaseModel):
+    """Global agent concurrency ceiling update."""
+    max_agents: int

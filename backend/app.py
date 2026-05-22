@@ -17,7 +17,7 @@ import db
 from models import (ProjectCreate, ProjectUpdate, MissionCreate, MissionUpdate,
                     DispatchOptions, TOOL_PRESETS, MODEL_CHOICES,
                     ServiceCreate, ServiceUpdate, IncidentCreate, IncidentUpdate,
-                    McpServerCreate)
+                    McpServerCreate, CeilingUpdate)
 import health_checker
 import mission_watcher
 import scheduler
@@ -301,7 +301,10 @@ from models import UserCreate, UserLogin
 async def auth_login(request: Request, body: UserLogin):
     from auth import get_user_by_email, verify_password, create_access_token
     user = await get_user_by_email(body.email)
-    if not user or not verify_password(body.password, user["password_hash"]):
+    # Always run bcrypt verify (against a dummy hash when user is None) so login
+    # timing does not leak whether the email is registered.
+    password_ok = verify_password(body.password, user["password_hash"] if user else None)
+    if not user or not password_ok:
         raise HTTPException(401, "Invalid email or password")
     conn = await db.get_db()
     try:
@@ -318,12 +321,16 @@ async def auth_login(request: Request, body: UserLogin):
 @_limiter.limit("5/minute")
 async def auth_register(request: Request, body: UserCreate):
     from auth import get_user_by_email, create_user, consume_invite_token, create_access_token
+    # Generic 400 for any registration failure (existing email, invalid token,
+    # bad password) so we don't leak which inputs are valid.
     if await get_user_by_email(body.email):
-        raise HTTPException(400, "Email already registered")
+        log.info("Registration rejected: email already in use (%s)", body.email)
+        raise HTTPException(400, "Registration failed — check your invite token and try again")
     try:
         user = await create_user(body.email, body.password)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    except ValueError:
+        log.exception("Registration rejected: invalid password")
+        raise HTTPException(400, "Registration failed — check your invite token and try again")
     valid = await consume_invite_token(body.invite_token, user["id"])
     if not valid:
         conn = await db.get_db()
@@ -332,7 +339,7 @@ async def auth_register(request: Request, body: UserCreate):
             await conn.commit()
         finally:
             await conn.close()
-        raise HTTPException(400, "Invalid, expired, or already-used invite token")
+        raise HTTPException(400, "Registration failed — check your invite token and try again")
     token = create_access_token(user["id"], user["email"], user["role"])
     return {"access_token": token, "token_type": "bearer",
             "user": {"id": user["id"], "email": user["email"], "role": user["role"]}}
@@ -499,7 +506,7 @@ async def update_project(pid: str, body: ProjectUpdate):
         await conn.close()
 
 
-@app.delete("/api/projects/{pid}")
+@app.delete("/api/projects/{pid}", status_code=204)
 async def delete_project(pid: str):
     conn = await db.get_db()
     try:
@@ -508,7 +515,6 @@ async def delete_project(pid: str):
             raise HTTPException(404, "Project not found")
         await conn.execute("DELETE FROM projects WHERE id=?", (pid,))
         await conn.commit()
-        return {"ok": True}
     finally:
         await conn.close()
 
@@ -561,7 +567,7 @@ async def create_mission(request: Request, body: MissionCreate):
     try:
         rows = await conn.execute_fetchall("SELECT id FROM projects WHERE id=?", (body.project_id,))
         if not rows:
-            raise HTTPException(400, "Project not found")
+            raise HTTPException(404, "Project not found")
         mid = str(uuid.uuid4())
         schedule_enabled = 1 if body.schedule_cron else 0
         # Get next mission number for this project
@@ -687,7 +693,7 @@ async def update_mission(mid: str, body: MissionUpdate):
         await conn.close()
 
 
-@app.delete("/api/missions/{mid}")
+@app.delete("/api/missions/{mid}", status_code=204)
 async def delete_mission(mid: str):
     conn = await db.get_db()
     try:
@@ -698,7 +704,6 @@ async def delete_mission(mid: str):
             raise HTTPException(400, "Cannot delete a running mission — cancel it first")
         await conn.execute("DELETE FROM missions WHERE id=?", (mid,))
         await conn.commit()
-        return {"ok": True}
     finally:
         await conn.close()
 
@@ -1328,7 +1333,7 @@ async def api_plan_project(body: PlanRequest):
         raise HTTPException(422, str(e))
     except Exception as e:
         log.exception("Plan failed")
-        raise HTTPException(500, f"Planning failed: {e}")
+        raise HTTPException(500, "Planning failed")
 
 
 # ──────────────────────────────────────────────
@@ -1378,7 +1383,7 @@ async def api_plan_intelligent(body: PlanIntelligentRequest):
         raise HTTPException(422, str(e))
     except Exception as e:
         log.exception("Intelligent planning failed")
-        raise HTTPException(500, f"Planning failed: {e}")
+        raise HTTPException(500, "Planning failed")
 
 
 class AnalyzeProjectRequest(BaseModel):
@@ -1411,7 +1416,7 @@ async def api_analyze_project(pid: str, body: AnalyzeProjectRequest):
         }
     except Exception as e:
         log.exception("Project analysis failed")
-        raise HTTPException(500, f"Analysis failed: {e}")
+        raise HTTPException(500, "Analysis failed")
 
 
 @app.get("/api/projects/{pid}/health")
@@ -1430,7 +1435,7 @@ async def api_project_health(pid: str):
         return health
     except Exception as e:
         log.exception("Health check failed")
-        raise HTTPException(500, f"Health check failed: {e}")
+        raise HTTPException(500, "Health check failed")
 
 
 @app.get("/api/projects/{pid}/missions/graph")
@@ -1456,7 +1461,7 @@ async def api_mission_graph(
         }
     except Exception as e:
         log.exception("Mission graph generation failed")
-        raise HTTPException(500, f"Graph generation failed: {e}")
+        raise HTTPException(500, "Graph generation failed")
 
 
 @app.get("/api/projects/{pid}/missions/summary-diagram")
@@ -1478,7 +1483,7 @@ async def api_project_summary(pid: str):
         }
     except Exception as e:
         log.exception("Summary diagram generation failed")
-        raise HTTPException(500, f"Diagram generation failed: {e}")
+        raise HTTPException(500, "Diagram generation failed")
 
 
 @app.get("/api/projects/{pid}/costs")
@@ -1497,7 +1502,7 @@ async def api_cost_analysis(pid: str):
         return analysis
     except Exception as e:
         log.exception("Cost analysis failed")
-        raise HTTPException(500, f"Cost analysis failed: {e}")
+        raise HTTPException(500, "Cost analysis failed")
 
 
 # ──────────────────────────────────────────────
@@ -1711,7 +1716,7 @@ async def start_remote_for_mission(mid: str):
     return {"url": url, "session_id": session_id}
 
 
-@app.delete("/api/sessions/{sid}/remote-control")
+@app.delete("/api/sessions/{sid}/remote-control", status_code=204)
 async def stop_remote(sid: str):
     """Stop a remote-control session and reset mission status."""
     if not ENABLE_REMOTE_CONTROL:
@@ -1752,8 +1757,6 @@ async def stop_remote(sid: str):
         await conn.commit()
     finally:
         await conn.close()
-
-    return {"ok": True}
 
 
 @app.get("/api/sessions/{sid}/remote-control")
@@ -1812,7 +1815,7 @@ async def create_service(body: ServiceCreate):
     try:
         rows = await conn.execute_fetchall("SELECT id FROM projects WHERE id=?", (body.project_id,))
         if not rows:
-            raise HTTPException(400, "Project not found")
+            raise HTTPException(404, "Project not found")
         sid = str(uuid.uuid4())
         await conn.execute(
             """INSERT INTO monitored_services (id, project_id, name, url, group_name, description,
@@ -1866,7 +1869,7 @@ async def update_service(sid: str, body: ServiceUpdate):
         await conn.close()
 
 
-@app.delete("/api/services/{sid}")
+@app.delete("/api/services/{sid}", status_code=204)
 async def delete_service(sid: str):
     conn = await db.get_db()
     try:
@@ -1875,7 +1878,6 @@ async def delete_service(sid: str):
             raise HTTPException(404, "Service not found")
         await conn.execute("DELETE FROM monitored_services WHERE id=?", (sid,))
         await conn.commit()
-        return {"ok": True}
     finally:
         await conn.close()
 
@@ -2080,7 +2082,7 @@ async def update_incident(iid: str, body: IncidentUpdate):
         await conn.close()
 
 
-@app.delete("/api/incidents/{iid}")
+@app.delete("/api/incidents/{iid}", status_code=204)
 async def delete_incident(iid: str):
     conn = await db.get_db()
     try:
@@ -2089,7 +2091,6 @@ async def delete_incident(iid: str):
             raise HTTPException(404, "Incident not found")
         await conn.execute("DELETE FROM incidents WHERE id=?", (iid,))
         await conn.commit()
-        return {"ok": True}
     finally:
         await conn.close()
 
@@ -2169,7 +2170,7 @@ async def add_mcp_server(pid: str, body: McpServerCreate):
         await conn.close()
 
 
-@app.delete("/api/mcp-servers/{mid}")
+@app.delete("/api/mcp-servers/{mid}", status_code=204)
 async def delete_mcp_server(mid: str):
     conn = await db.get_db()
     try:
@@ -2178,7 +2179,6 @@ async def delete_mcp_server(mid: str):
             raise HTTPException(404, "MCP server config not found")
         await conn.execute("DELETE FROM mcp_configs WHERE id=?", (mid,))
         await conn.commit()
-        return {"ok": True}
     finally:
         await conn.close()
 
@@ -2210,7 +2210,7 @@ async def set_schedule(mid: str, body: ScheduleRequest):
         await conn.close()
 
 
-@app.delete("/api/missions/{mid}/schedule")
+@app.delete("/api/missions/{mid}/schedule", status_code=204)
 async def remove_schedule(mid: str):
     """Disable scheduling on a mission."""
     conn = await db.get_db()
@@ -2220,7 +2220,6 @@ async def remove_schedule(mid: str):
             (datetime.now(timezone.utc).isoformat(), mid),
         )
         await conn.commit()
-        return {"ok": True}
     finally:
         await conn.close()
 
@@ -2299,16 +2298,15 @@ async def system_status():
 
 
 @app.patch("/api/system/ceiling")
-async def set_ceiling(request: Request, body: dict):
+async def set_ceiling(request: Request, body: CeilingUpdate):
     """Set the global agent ceiling at runtime. Admin only."""
     _u = getattr(request.state, "user", None)
     if not _u or _u.get("role") != "admin":
         raise HTTPException(403, "Admin access required")
-    global MAX_CONCURRENT_AGENTS
-    val = body.get("max_agents")
-    if not isinstance(val, int) or val < 0:
+    if body.max_agents < 0:
         raise HTTPException(400, "max_agents must be a non-negative integer")
-    MAX_CONCURRENT_AGENTS = val
+    global MAX_CONCURRENT_AGENTS
+    MAX_CONCURRENT_AGENTS = body.max_agents
     running_count = sum(1 for t in running_tasks.values() if not t.done())
     return {"max_agents": MAX_CONCURRENT_AGENTS, "running_agents": running_count}
 
