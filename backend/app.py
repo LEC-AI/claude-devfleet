@@ -2302,16 +2302,57 @@ async def list_mission_events(mid: str, limit: int = Query(20)):
         await conn.close()
 
 
+_tunnel_status_cache: dict = {"value": None, "expires_at": 0.0}
+_TUNNEL_STATUS_TTL_SEC = 15.0
+
+
 def _tunnel_status() -> dict:
-    """Check if cloudflared tunnel is running and return its public URL."""
+    """Check cloudflared tunnel health. Prefers the local /ready endpoint
+    (sub-millisecond, Sydney-local) over `cloudflared tunnel info` (which
+    round-trips to Cloudflare's US control plane — adds ~640ms per call).
+
+    Result is cached for _TUNNEL_STATUS_TTL_SEC so the dashboard's 5s poll
+    doesn't pay the cost on every tick even if the local endpoint is down.
+    """
+    import time as _time
+    now = _time.monotonic()
+    cached = _tunnel_status_cache["value"]
+    if cached is not None and now < _tunnel_status_cache["expires_at"]:
+        return cached
+
+    result = _tunnel_status_uncached()
+    _tunnel_status_cache["value"] = result
+    _tunnel_status_cache["expires_at"] = now + _TUNNEL_STATUS_TTL_SEC
+    return result
+
+
+def _tunnel_status_uncached() -> dict:
+    # Fast path — local cloudflared metrics endpoint (auto-discovered via lsof)
     import subprocess, json as _json
+    fallback = {"connected": False, "url": None, "connections": 0}
     try:
-        result = subprocess.run(
+        port = _discover_cloudflared_metrics_port()
+        if port:
+            import urllib.request, urllib.error
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/ready", timeout=1) as r:
+                data = _json.loads(r.read())
+            conns = int(data.get("readyConnections", 0))
+            return {
+                "connected": conns > 0,
+                "url": "https://farhanfleet.nexis365.com.au" if conns > 0 else None,
+                "connections": conns,
+            }
+    except Exception:
+        pass
+
+    # Slow fallback — only used when the local metrics endpoint is unreachable
+    try:
+        proc = subprocess.run(
             ["cloudflared", "tunnel", "info", "--output", "json", "farhanfleet"],
-            capture_output=True, text=True, timeout=4
+            capture_output=True, text=True, timeout=4,
         )
-        if result.returncode == 0:
-            data = _json.loads(result.stdout)
+        if proc.returncode == 0:
+            data = _json.loads(proc.stdout)
             conns = data.get("conns") or []
             connected = len(conns) > 0
             return {
@@ -2321,7 +2362,41 @@ def _tunnel_status() -> dict:
             }
     except Exception:
         pass
-    return {"connected": False, "url": None, "connections": 0}
+    return fallback
+
+
+_cloudflared_port_cache: dict = {"port": None, "checked_at": 0.0}
+_PORT_DISCOVERY_TTL_SEC = 60.0
+
+
+def _discover_cloudflared_metrics_port() -> int | None:
+    """Find the metrics port cloudflared is listening on. Cached for 60s
+    because the port doesn't change unless cloudflared restarts."""
+    import time as _time, subprocess
+    now = _time.monotonic()
+    if _cloudflared_port_cache["port"] is not None and \
+            now - _cloudflared_port_cache["checked_at"] < _PORT_DISCOVERY_TTL_SEC:
+        return _cloudflared_port_cache["port"]
+
+    try:
+        # `lsof -an -iTCP -sTCP:LISTEN -c cloudflared` lists listening sockets;
+        # parse the first 127.0.0.1:<port>. Use absolute path because launchd's
+        # PATH doesn't include /usr/sbin where macOS keeps lsof.
+        lsof_bin = "/usr/sbin/lsof" if os.path.exists("/usr/sbin/lsof") else "lsof"
+        out = subprocess.run(
+            [lsof_bin, "-an", "-iTCP", "-sTCP:LISTEN", "-c", "cloudflared", "-Fn"],
+            capture_output=True, text=True, timeout=2,
+        )
+        port: int | None = None
+        for line in out.stdout.splitlines():
+            if line.startswith("n127.0.0.1:"):
+                port = int(line.split(":", 1)[1])
+                break
+        _cloudflared_port_cache["port"] = port
+        _cloudflared_port_cache["checked_at"] = now
+        return port
+    except Exception:
+        return None
 
 
 @app.get("/api/system/status")
