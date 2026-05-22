@@ -143,36 +143,37 @@ async def _reap_stuck_sessions():
     finally:
         await conn.close()
 
-    if not stuck:
-        return
-
-    from sdk_engine import running_tasks
-    for row in stuck:
-        session_id = row["id"]
-        task = running_tasks.get(session_id)
-        if task and not task.done():
-            log.warning(
-                "Session %s has been silent for >%d min — cancelling as stuck",
-                session_id, stuck_threshold_minutes,
-            )
-            task.cancel()
-        elif not task:
-            # No task running but DB says running — orphaned session, mark failed
-            conn2 = await db.get_db()
-            try:
-                now = datetime.now(timezone.utc).isoformat()
-                await conn2.execute(
-                    "UPDATE agent_sessions SET status='failed', ended_at=? WHERE id=?",
-                    (now, session_id),
+    # Reap 'running' sessions that have gone silent. The remote-ghost branch
+    # further down must run regardless of whether any 'running' sessions are
+    # stuck, so we no longer early-return when this query is empty.
+    if stuck:
+        from sdk_engine import running_tasks
+        for row in stuck:
+            session_id = row["id"]
+            task = running_tasks.get(session_id)
+            if task and not task.done():
+                log.warning(
+                    "Session %s has been silent for >%d min — cancelling as stuck",
+                    session_id, stuck_threshold_minutes,
                 )
-                await conn2.execute(
-                    "UPDATE missions SET status='failed', updated_at=? WHERE id=?",
-                    (now, row["mission_id"]),
-                )
-                await conn2.commit()
-                log.warning("Cleaned up orphaned session %s (no task, DB said running)", session_id)
-            finally:
-                await conn2.close()
+                task.cancel()
+            elif not task:
+                # No task running but DB says running — orphaned session, mark failed
+                conn2 = await db.get_db()
+                try:
+                    now = datetime.now(timezone.utc).isoformat()
+                    await conn2.execute(
+                        "UPDATE agent_sessions SET status='failed', ended_at=? WHERE id=?",
+                        (now, session_id),
+                    )
+                    await conn2.execute(
+                        "UPDATE missions SET status='failed', updated_at=? WHERE id=?",
+                        (now, row["mission_id"]),
+                    )
+                    await conn2.commit()
+                    log.warning("Cleaned up orphaned session %s (no task, DB said running)", session_id)
+                finally:
+                    await conn2.close()
 
     # ── Reap abandoned remote sessions ──────────────────────────────────────────
     remote_timeout_hours = int(os.environ.get("DEVFLEET_REMOTE_TIMEOUT_HOURS", "2"))
