@@ -6,7 +6,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -525,10 +525,13 @@ async def delete_project(pid: str):
 
 @app.get("/api/missions")
 async def list_missions(
+    response: Response,
     project_id: str = Query(None),
     status: str = Query(None),
     tag: str = Query(None),
     parent_mission_id: str = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
 ):
     conn = await db.get_db()
     try:
@@ -548,6 +551,8 @@ async def list_missions(
             params.append(parent_mission_id)
         query += " ORDER BY m.priority DESC, m.created_at DESC"
         rows = await conn.execute_fetchall(query, params)
+        # Tag filter is applied in Python because tags are stored as JSON text;
+        # LIMIT/OFFSET therefore slice the filtered list rather than the raw SQL result.
         results = []
         for r in rows:
             d = dict(r)
@@ -556,7 +561,8 @@ async def list_missions(
                 if tag not in tags:
                     continue
             results.append(d)
-        return results
+        response.headers["X-Total-Count"] = str(len(results))
+        return results[offset:offset + limit]
     finally:
         await conn.close()
 
@@ -1073,23 +1079,42 @@ async def resume(mid: str, body: DispatchOptions | None = None):
 # ──────────────────────────────────────────────
 
 @app.get("/api/sessions")
-async def list_sessions(mission_id: str = Query(None), status: str = Query(None)):
+async def list_sessions(
+    response: Response,
+    mission_id: str = Query(None),
+    status: str = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
     conn = await db.get_db()
     try:
-        query = """SELECT s.*, m.title AS mission_title, p.name AS project_name
-                   FROM agent_sessions s
-                   JOIN missions m ON m.id = s.mission_id
-                   JOIN projects p ON p.id = m.project_id
-                   WHERE 1=1"""
+        base_where = "WHERE 1=1"
         params = []
         if mission_id:
-            query += " AND s.mission_id=?"
+            base_where += " AND s.mission_id=?"
             params.append(mission_id)
         if status:
-            query += " AND s.status=?"
+            base_where += " AND s.status=?"
             params.append(status)
-        query += " ORDER BY s.started_at DESC"
-        rows = await conn.execute_fetchall(query, params)
+        # Total count uses the same JOINs as the data query so orphan rows
+        # (sessions whose mission/project was deleted) aren't counted as matches.
+        count_rows = await conn.execute_fetchall(
+            f"""SELECT COUNT(*) AS n FROM agent_sessions s
+                JOIN missions m ON m.id = s.mission_id
+                JOIN projects p ON p.id = m.project_id
+                {base_where}""",
+            params,
+        )
+        total = count_rows[0]["n"] if count_rows else 0
+        query = f"""SELECT s.*, m.title AS mission_title, p.name AS project_name
+                    FROM agent_sessions s
+                    JOIN missions m ON m.id = s.mission_id
+                    JOIN projects p ON p.id = m.project_id
+                    {base_where}
+                    ORDER BY s.started_at DESC
+                    LIMIT ? OFFSET ?"""
+        rows = await conn.execute_fetchall(query, params + [limit, offset])
+        response.headers["X-Total-Count"] = str(total)
         return [dict(r) for r in rows]
     finally:
         await conn.close()
@@ -1145,23 +1170,39 @@ async def cancel(sid: str):
 # ──────────────────────────────────────────────
 
 @app.get("/api/reports")
-async def list_reports(project_id: str = Query(None), mission_id: str = Query(None)):
+async def list_reports(
+    response: Response,
+    project_id: str = Query(None),
+    mission_id: str = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
     conn = await db.get_db()
     try:
-        query = """SELECT r.*, m.title AS mission_title, p.name AS project_name
-                   FROM reports r
-                   JOIN missions m ON m.id = r.mission_id
-                   JOIN projects p ON p.id = m.project_id
-                   WHERE 1=1"""
+        base_where = "WHERE 1=1"
         params = []
         if mission_id:
-            query += " AND r.mission_id=?"
+            base_where += " AND r.mission_id=?"
             params.append(mission_id)
         if project_id:
-            query += " AND m.project_id=?"
+            base_where += " AND m.project_id=?"
             params.append(project_id)
-        query += " ORDER BY r.created_at DESC"
-        rows = await conn.execute_fetchall(query, params)
+        count_rows = await conn.execute_fetchall(
+            f"""SELECT COUNT(*) AS n FROM reports r
+                JOIN missions m ON m.id = r.mission_id
+                {base_where}""",
+            params,
+        )
+        total = count_rows[0]["n"] if count_rows else 0
+        query = f"""SELECT r.*, m.title AS mission_title, p.name AS project_name
+                    FROM reports r
+                    JOIN missions m ON m.id = r.mission_id
+                    JOIN projects p ON p.id = m.project_id
+                    {base_where}
+                    ORDER BY r.created_at DESC
+                    LIMIT ? OFFSET ?"""
+        rows = await conn.execute_fetchall(query, params + [limit, offset])
+        response.headers["X-Total-Count"] = str(total)
         return [dict(r) for r in rows]
     finally:
         await conn.close()
