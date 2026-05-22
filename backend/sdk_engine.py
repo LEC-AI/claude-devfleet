@@ -349,15 +349,23 @@ async def _build_sdk_options(
         ]
     }
 
-    # Per-user git identity — agents commit as the mission creator, not the machine owner
-    _creator_name = (mission.get("created_by_name") or "DevFleet").strip().capitalize()
-    _creator_email = mission.get("created_by_email") or "agent@devfleet.local"
-    _git_env = {
-        "GIT_AUTHOR_NAME": _creator_name,
-        "GIT_AUTHOR_EMAIL": _creator_email,
-        "GIT_COMMITTER_NAME": _creator_name,
-        "GIT_COMMITTER_EMAIL": _creator_email,
-    }
+    # Per-user git identity — agents commit as the mission creator when one is
+    # explicitly set on the mission. Otherwise we DON'T set GIT_AUTHOR_*/
+    # GIT_COMMITTER_* env vars at all, so git falls through to the project's
+    # local + global git config (e.g. `git config user.name`). This keeps
+    # commits attributed to the repo owner instead of a generic "DevFleet"
+    # placeholder, which previously violated downstream IP/attribution rules
+    # (commits like `Devfleet <agent@devfleet.local>` had to be rewritten
+    # post-cherry-pick before shipping to protected branches).
+    _creator_name = mission.get("created_by_name")
+    _creator_email = mission.get("created_by_email")
+    _git_env: dict[str, str] = {}
+    if _creator_name and _creator_name.strip():
+        _git_env["GIT_AUTHOR_NAME"] = _creator_name.strip()
+        _git_env["GIT_COMMITTER_NAME"] = _creator_name.strip()
+    if _creator_email and _creator_email.strip():
+        _git_env["GIT_AUTHOR_EMAIL"] = _creator_email.strip()
+        _git_env["GIT_COMMITTER_EMAIL"] = _creator_email.strip()
 
     kwargs = dict(
         model=model,
