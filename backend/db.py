@@ -9,6 +9,14 @@ CREATE TABLE IF NOT EXISTS projects (
     name TEXT NOT NULL,
     path TEXT NOT NULL,
     description TEXT DEFAULT '',
+    system_prompt TEXT DEFAULT '',
+    state TEXT DEFAULT 'active',
+    owner TEXT DEFAULT '',
+    start_date TEXT DEFAULT '',
+    target_end_date TEXT DEFAULT '',
+    parent_team TEXT DEFAULT '',
+    teams_channel_id TEXT DEFAULT '',
+    teams_channel_name TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -34,7 +42,8 @@ CREATE TABLE IF NOT EXISTS missions (
     schedule_cron TEXT,
     schedule_enabled INTEGER DEFAULT 0,
     last_scheduled_at TEXT,
-    mission_number INTEGER
+    mission_number INTEGER,
+    callback_url TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS agent_sessions (
@@ -170,6 +179,24 @@ async def init_db():
             "ALTER TABLE missions ADD COLUMN schedule_enabled INTEGER DEFAULT 0",
             "ALTER TABLE missions ADD COLUMN last_scheduled_at TEXT",
             "ALTER TABLE missions ADD COLUMN mission_number INTEGER",
+            # v4: Webhook callbacks for external integrations
+            "ALTER TABLE missions ADD COLUMN callback_url TEXT DEFAULT ''",
+            # v5: Project-level system prompt — injected into every mission dispatch
+            "ALTER TABLE projects ADD COLUMN system_prompt TEXT DEFAULT ''",
+            # v6: Retry robustness — auto-retry on transient errors
+            "ALTER TABLE missions ADD COLUMN max_retries INTEGER DEFAULT 3",
+            "ALTER TABLE missions ADD COLUMN auto_retry INTEGER DEFAULT 1",
+            "ALTER TABLE agent_sessions ADD COLUMN retry_count INTEGER DEFAULT 0",
+            "ALTER TABLE agent_sessions ADD COLUMN last_error TEXT DEFAULT ''",
+            "ALTER TABLE agent_sessions ADD COLUMN error_type TEXT DEFAULT ''",
+            # v7: Project lifecycle + Microsoft Teams channel wiring
+            "ALTER TABLE projects ADD COLUMN state TEXT DEFAULT 'active'",
+            "ALTER TABLE projects ADD COLUMN owner TEXT DEFAULT ''",
+            "ALTER TABLE projects ADD COLUMN start_date TEXT DEFAULT ''",
+            "ALTER TABLE projects ADD COLUMN target_end_date TEXT DEFAULT ''",
+            "ALTER TABLE projects ADD COLUMN parent_team TEXT DEFAULT ''",
+            "ALTER TABLE projects ADD COLUMN teams_channel_id TEXT DEFAULT ''",
+            "ALTER TABLE projects ADD COLUMN teams_channel_name TEXT DEFAULT ''",
         ]
         for migration in migrations:
             try:
