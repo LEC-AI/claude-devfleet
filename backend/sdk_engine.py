@@ -57,7 +57,261 @@ from prompt_template import build_prompt
 from worktree import create_worktree, cleanup_worktree
 from models import TOOL_PRESETS, DispatchOptions
 
+import httpx
+import random
+
 log = logging.getLogger("devfleet.sdk_engine")
+
+
+def _stderr_log_path(session_id: str) -> str:
+    """Per-session file the spawned Claude CLI writes its stderr/debug log into.
+
+    The SDK swallows the CLI's stderr by default and surfaces a useless
+    "Check stderr output for details" placeholder when the CLI exits non-zero.
+    Tee'ing it to a file gives us real diagnostic info on failure.
+    """
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    log_dir = os.path.join(backend_dir, "..", "data", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    return os.path.join(log_dir, f"session-{session_id}.stderr.log")
+
+
+def _read_stderr_tail(session_id: str, max_chars: int = 4000) -> str:
+    """Read the last `max_chars` from the per-session stderr log, if any."""
+    path = _stderr_log_path(session_id)
+    if not os.path.exists(path):
+        return ""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size > max_chars:
+                f.seek(size - max_chars)
+                # Drop the partial first line for readability
+                _ = f.readline()
+            return f.read().decode("utf-8", errors="replace").strip()
+    except Exception as e:
+        log.warning("Failed to read stderr tail for %s: %s", session_id, e)
+        return ""
+
+
+# ── Retry configuration ─────────────────────────────────────────
+DEFAULT_MAX_RETRIES = int(os.environ.get("DEVFLEET_MAX_RETRIES", "3"))
+DEFAULT_RETRY_INITIAL_DELAY = float(os.environ.get("DEVFLEET_RETRY_INITIAL_DELAY", "2.0"))
+DEFAULT_RETRY_MAX_DELAY = float(os.environ.get("DEVFLEET_RETRY_MAX_DELAY", "60.0"))
+
+# Error patterns that indicate transient failures (should retry)
+_TRANSIENT_PATTERNS = [
+    "500", "502", "503", "504", "429",  # HTTP status codes
+    "internal server error", "service unavailable", "bad gateway",
+    "gateway timeout", "rate limit", "overloaded",
+    "timeout", "timed out", "connection reset", "connection refused",
+    "broken pipe", "eof", "ssl", "network",
+]
+
+
+def _is_transient_error(exc: Exception, stderr: str = "", exit_code: int | None = None) -> bool:
+    """Classify an exception as transient (retry) or permanent (fail).
+
+    Looks at both the SDK exception text and (when provided) the captured CLI
+    stderr. A generic `exit code 1` with the SDK placeholder text and no real
+    stderr is treated as transient — empirically these are MCP/API startup
+    blips, not genuine permanent failures.
+    """
+    err = str(exc).lower()
+    if any(p in err for p in _TRANSIENT_PATTERNS):
+        return True
+    stderr_low = (stderr or "").lower()
+    if stderr_low and any(p in stderr_low for p in _TRANSIENT_PATTERNS):
+        return True
+    if exit_code == 1 and (
+        "check stderr output for details" in err
+        or not stderr.strip()
+    ):
+        return True
+    return False
+
+
+def _classify_error(exc_or_msg, stderr: str = "", exit_code: int | None = None) -> str:
+    """Map an error string to a stable taxonomy clients can branch on.
+
+    Now also inspects the real CLI stderr (captured per-session) and the
+    CLI exit code. The SDK historically reports the placeholder "Check stderr
+    output for details" with exit code 1; on its own that string carries no
+    signal, but the real stderr usually reveals whether the cause was transient
+    (rate-limit, MCP-init, network) or a genuine permanent error.
+    """
+    msg = str(exc_or_msg).lower()
+    stderr_low = (stderr or "").lower()
+    if any(p in msg for p in ("rate limit", "rate_limit", "429", "overloaded", "quota")):
+        return "rate_limit_exhausted"
+    if stderr_low and any(p in stderr_low for p in ("rate limit", "rate_limit", "429", "overloaded", "quota")):
+        return "rate_limit_exhausted"
+    if any(p in msg for p in _TRANSIENT_PATTERNS):
+        return "transient_exhausted"
+    if stderr_low and any(p in stderr_low for p in _TRANSIENT_PATTERNS):
+        return "transient_exhausted"
+
+    # Generic "exit code 1" with the SDK placeholder stderr and no real captured
+    # stderr → almost certainly an early-startup failure (MCP server init, env,
+    # transient API). Mark retryable so the dispatcher escalates next time
+    # instead of permanently burying the mission.
+    if exit_code == 1 and (
+        "check stderr output for details" in msg
+        or not stderr.strip()
+    ):
+        return "unknown_early_exit"
+
+    return "permanent_error"
+
+
+def _validate_completion(
+    total_tokens: int,
+    total_cost: float,
+    output_chunks: list,
+    report_data: dict | None,
+    worktree_had_commits: bool,
+) -> tuple[bool, str]:
+    """Decide whether a session that exited the SDK loop without raising
+    actually did real work. Returns (ok, reason). ok=True → mark completed.
+    """
+    if total_tokens == 0 and total_cost == 0.0:
+        return False, (
+            "Agent ran but produced 0 tokens and $0 cost — likely rate-limited "
+            "and gave up silently. Re-dispatch when API quota resets."
+        )
+    if not output_chunks and report_data is None and not worktree_had_commits:
+        return False, (
+            "Agent finished without text output, without calling submit_report, "
+            "and without any worktree commits — no evidence of real work."
+        )
+    if total_cost < 0.05 and not worktree_had_commits and report_data is None:
+        return False, (
+            f"Agent finished too cheaply (${total_cost:.4f}) with no commits and "
+            f"no submit_report — looks like a stub completion."
+        )
+    return True, ""
+
+
+async def _worktree_had_commits(project_path: str, session_id: str) -> bool:
+    """Check whether the worktree branch has commits ahead of master."""
+    short_id = session_id[:8]
+    branch_name = f"devfleet/{short_id}"
+    proc = await asyncio.create_subprocess_exec(
+        "git", "log", f"HEAD..{branch_name}", "--oneline",
+        cwd=project_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    return bool(stdout.strip())
+
+
+async def _master_status_lines(project_path: str) -> set[str]:
+    """Snapshot of `git status --porcelain` lines on master. Used to detect
+    cwd-escape: agent writes that landed in master's working tree instead of
+    the isolated worktree (a real bug observed with some models/configs).
+    Lines look like '?? agents/foo.py' or ' M agents/bar.py'.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "git", "status", "--porcelain",
+        cwd=project_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    return set(line for line in stdout.decode().splitlines() if line.strip())
+
+
+def _extract_path_from_status_line(line: str) -> str:
+    """`?? agents/foo.py` → `agents/foo.py`. ` M file -> renamed` → `renamed`."""
+    if not line or len(line) < 4:
+        return ""
+    rest = line[3:]
+    # rename lines look like ' R old -> new' — take the new path
+    if " -> " in rest:
+        rest = rest.split(" -> ", 1)[1]
+    # quoted paths (when name has spaces / unicode) — strip quotes
+    if rest.startswith('"') and rest.endswith('"'):
+        rest = rest[1:-1]
+    return rest
+
+
+async def _recover_cwd_escape(
+    project_path: str,
+    session_id: str,
+    escaped_status_lines: set[str],
+) -> tuple[bool, str, list[str]]:
+    """Agent wrote files into master's working tree instead of the worktree.
+    Stage+commit those files directly on master so the work isn't lost.
+    Returns (ok, message, file_paths_committed).
+    """
+    short_id = session_id[:8]
+    files = []
+    for line in escaped_status_lines:
+        p = _extract_path_from_status_line(line)
+        if p and not p.startswith(".devfleet-worktrees/"):
+            files.append(p)
+    if not files:
+        return True, "", []
+
+    # Stage just those paths (don't `git add -A` — keep blast radius tight)
+    add_proc = await asyncio.create_subprocess_exec(
+        "git", "add", "--", *files,
+        cwd=project_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, add_err = await add_proc.communicate()
+    if add_proc.returncode != 0:
+        return False, f"git add failed: {add_err.decode()[:200]}", files
+
+    msg = (
+        f"DevFleet: cwd-escape recovery for session {short_id}\n\n"
+        f"Agent wrote {len(files)} file(s) into master's working tree instead of "
+        f"the isolated worktree (.devfleet-worktrees/session-{short_id}). "
+        f"Auto-staging+committing here so the work isn't lost on next worktree creation."
+    )
+    commit_proc = await asyncio.create_subprocess_exec(
+        "git", "commit", "-m", msg,
+        cwd=project_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, commit_err = await commit_proc.communicate()
+    if commit_proc.returncode != 0:
+        return False, f"git commit failed: {commit_err.decode()[:200]}", files
+
+    log.warning(
+        "Session %s cwd-escape: recovered %d file(s) on master via direct commit",
+        session_id, len(files),
+    )
+    return True, f"Recovered {len(files)} file(s) on master", files
+
+
+def _retry_delay(attempt: int, initial: float = 2.0, maximum: float = 60.0) -> float:
+    """Exponential backoff with jitter. attempt is 0-indexed."""
+    delay = min(initial * (2 ** attempt), maximum)
+    jitter = random.uniform(0, delay * 0.25)  # 25% jitter
+    return delay + jitter
+
+
+async def _fire_callback(mission: dict, status: str, payload: dict | None = None):
+    """POST to mission's callback_url if set. Fire-and-forget, never raises."""
+    url = (mission.get("callback_url") or "").strip()
+    if not url:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(url, json={
+                "mission_id": mission["id"],
+                "mission_title": mission.get("title", ""),
+                "project_id": mission.get("project_id", ""),
+                "status": status,
+                "payload": payload or {},
+            })
+        log.info("Callback fired: %s → %s", status, url)
+    except Exception as e:
+        log.warning("Callback failed for mission %s: %s", mission.get("id"), e)
 
 # ── In-memory state (same pattern as old dispatcher) ──
 running_tasks: dict[str, asyncio.Task] = {}
@@ -121,6 +375,7 @@ def _build_sdk_options(
     session_id: str = "",
     resume_session_id: str | None = None,
     extra_mcp_servers: dict | None = None,
+    stderr_file=None,
 ) -> ClaudeCodeOptions:
     """Build ClaudeCodeOptions from mission config + dispatch overrides."""
 
@@ -236,6 +491,11 @@ def _build_sdk_options(
     )
     if mcp_servers:
         kwargs["mcp_servers"] = mcp_servers
+    if stderr_file is not None:
+        # Capture the spawned CLI's stderr so failures expose real diagnostics
+        # instead of the SDK's "Check stderr output for details" placeholder.
+        kwargs["debug_stderr"] = stderr_file
+        kwargs["extra_args"] = {"debug-to-stderr": None}
     return ClaudeCodeOptions(**kwargs)
 
 
@@ -355,15 +615,59 @@ async def _run_agent(
     # Initialize event buffer
     _event_buffers[session_id] = []
 
+    # cwd-escape detection: snapshot master's status so we can detect any agent
+    # writes that bypass the worktree. Empty set if not a git project.
+    pre_master_status: set[str] = set()
+    if worktree_path:
+        try:
+            pre_master_status = await _master_status_lines(project_path)
+        except Exception as e:
+            log.warning("Failed pre-status snapshot for %s: %s", session_id, e)
+
+    # Capture the CLI's stderr to a per-session file so on failure we get real
+    # diagnostics instead of "Check stderr output for details".
+    try:
+        stderr_file = open(_stderr_log_path(session_id), "ab", buffering=0)
+    except Exception as e:
+        log.warning("Failed to open stderr log for %s: %s", session_id, e)
+        stderr_file = None
+
     try:
         # Load per-project MCP configs from DB
         extra_mcp = await _load_project_mcp_configs(mission.get("project_id", ""))
 
+        # Inject project-level system_prompt — prepend to any per-dispatch override
+        project_system_prompt = ""
+        proj_id = mission.get("project_id", "")
+        if proj_id:
+            try:
+                conn = await db.get_db()
+                try:
+                    rows = await conn.execute_fetchall(
+                        "SELECT system_prompt FROM projects WHERE id=?", (proj_id,)
+                    )
+                    if rows and rows[0]["system_prompt"]:
+                        project_system_prompt = rows[0]["system_prompt"]
+                finally:
+                    await conn.close()
+            except Exception:
+                pass
+
+        if project_system_prompt:
+            if opts is None:
+                opts = DispatchOptions()
+            existing_sp = opts.append_system_prompt or ""
+            opts = opts.model_copy(update={
+                "append_system_prompt": (project_system_prompt + "\n\n" + existing_sp).strip()
+            })
+
+        # Build initial options (rebuilt inside retry loop if claude_session_id is captured)
         sdk_options = _build_sdk_options(
             mission, opts, work_dir,
             session_id=session_id,
             resume_session_id=resume_session_id,
             extra_mcp_servers=extra_mcp or None,
+            stderr_file=stderr_file,
         )
         model_used = sdk_options.model or "claude-opus-4-6"
 
@@ -383,94 +687,275 @@ async def _run_agent(
         })
 
         claude_session_id = ""
+        current_resume_id = resume_session_id  # rolls forward when SystemMessage gives us one
+        attempt_prompt = prompt  # swapped to "continue" prompt after first attempt that captured a session
 
-        # Stream messages from the SDK
-        # Wrap in safe iterator to skip unparseable events (e.g. rate_limit_event)
-        async for message in _safe_query(prompt=prompt, options=sdk_options):
-            if isinstance(message, SystemMessage):
-                # Capture session ID for resume capability
-                claude_session_id = message.data.get("session_id", "") or ""
-                if claude_session_id:
-                    log.info("Session %s → Claude session ID: %s", session_id, claude_session_id)
+        # ── Retry configuration ──────────────────────────────
+        max_retries = (opts.max_retries if opts else DEFAULT_MAX_RETRIES) or DEFAULT_MAX_RETRIES
+        retry_initial = (opts.retry_initial_delay if opts else DEFAULT_RETRY_INITIAL_DELAY) or DEFAULT_RETRY_INITIAL_DELAY
+        retry_max = (opts.retry_max_delay if opts else DEFAULT_RETRY_MAX_DELAY) or DEFAULT_RETRY_MAX_DELAY
+        retry_count = 0
+        last_transient_error = ""
+
+        # ── Stream messages from the SDK (with retry on transient errors) ──
+        while True:
+            # Rebuild options if we have a resume id from a prior attempt
+            if current_resume_id and current_resume_id != resume_session_id:
+                sdk_options = _build_sdk_options(
+                    mission, opts, work_dir,
+                    session_id=session_id,
+                    resume_session_id=current_resume_id,
+                    extra_mcp_servers=extra_mcp or None,
+                    stderr_file=stderr_file,
+                )
+            try:
+                async for message in _safe_query(prompt=attempt_prompt, options=sdk_options):
+                    if isinstance(message, SystemMessage):
+                        # Capture session ID for resume capability
+                        new_id = message.data.get("session_id", "") or ""
+                        if new_id:
+                            if not claude_session_id:
+                                claude_session_id = new_id
+                            current_resume_id = new_id  # use this on any future retry
+                            log.info("Session %s → Claude session ID: %s", session_id, new_id)
+                            try:
+                                conn = await db.get_db()
+                                await conn.execute(
+                                    "UPDATE agent_sessions SET claude_session_id=?, model=? WHERE id=?",
+                                    (claude_session_id, model_used, session_id),
+                                )
+                                await conn.commit()
+                                await conn.close()
+                            except Exception:
+                                pass
+
+                    elif isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            _broadcast_content_block(session_id, block)
+                            if isinstance(block, TextBlock):
+                                output_chunks.append(block.text)
+
+                    elif isinstance(message, UserMessage):
+                        # Tool results come back as UserMessages
+                        content = message.content
+                        if isinstance(content, list):
+                            for block in content:
+                                if isinstance(block, ToolResultBlock):
+                                    _broadcast_content_block(session_id, block)
+
+                    elif isinstance(message, ResultMessage):
+                        # Final result with usage/cost
+                        result_text = getattr(message, "result", "") or ""
+                        if result_text:
+                            combined = "".join(output_chunks)
+                            if result_text not in combined:
+                                output_chunks.append(result_text)
+                                _broadcast(session_id, {"type": "text", "text": "\n" + result_text})
+
+                        # Extract cost and usage — ResultMessage has direct attrs
+                        usage = message.usage  # dict or None
+                        cost = message.total_cost_usd  # float or None
+                        input_t = 0
+                        output_t = 0
+                        if usage and isinstance(usage, dict):
+                            input_t = usage.get("input_tokens", 0) or 0
+                            output_t = usage.get("output_tokens", 0) or 0
+                            total_tokens = existing_tokens + input_t + output_t
+                        if cost:
+                            total_cost = existing_cost + cost
+                        if cost or usage:
+                            _broadcast(session_id, {
+                                "type": "usage",
+                                "usage": {"input_tokens": input_t, "output_tokens": output_t},
+                                "cost": total_cost,
+                            })
+
+                break  # Success — exit retry loop
+
+            except asyncio.CancelledError:
+                raise  # Don't retry cancellations
+
+            except Exception as query_exc:
+                live_stderr = _read_stderr_tail(session_id)
+                exit_code = getattr(query_exc, "exit_code", None)
+                if _is_transient_error(query_exc, stderr=live_stderr, exit_code=exit_code) and retry_count < max_retries:
+                    retry_count += 1
+                    delay = _retry_delay(retry_count - 1, retry_initial, retry_max)
+                    last_transient_error = str(query_exc)
+
+                    # If the SDK gave us a Claude session id during this attempt,
+                    # switch to "continue" prompting so the agent doesn't restart from scratch.
+                    if current_resume_id:
+                        attempt_prompt = (
+                            "Continue from where you left off — finish the remaining "
+                            "work and call submit_report when done."
+                        )
+
+                    log.warning(
+                        "Session %s: transient error (attempt %d/%d, resume=%s), retrying in %.1fs: %s",
+                        session_id, retry_count, max_retries,
+                        current_resume_id or "none", delay, query_exc,
+                    )
+                    _broadcast(session_id, {
+                        "type": "retry",
+                        "attempt": retry_count,
+                        "max_retries": max_retries,
+                        "delay": round(delay, 1),
+                        "error": str(query_exc)[:200],
+                        "resume": bool(current_resume_id),
+                    })
+
+                    # Update session with retry state
                     try:
                         conn = await db.get_db()
                         await conn.execute(
-                            "UPDATE agent_sessions SET claude_session_id=?, model=? WHERE id=?",
-                            (claude_session_id, model_used, session_id),
+                            "UPDATE agent_sessions SET retry_count=?, last_error=?, error_type='transient' WHERE id=?",
+                            (retry_count, str(query_exc)[:500], session_id),
                         )
                         await conn.commit()
                         await conn.close()
                     except Exception:
                         pass
 
-            elif isinstance(message, AssistantMessage):
-                for block in message.content:
-                    _broadcast_content_block(session_id, block)
-                    if isinstance(block, TextBlock):
-                        output_chunks.append(block.text)
+                    await asyncio.sleep(delay)
+                    continue  # Retry — sdk_options gets rebuilt at top of loop
 
-            elif isinstance(message, UserMessage):
-                # Tool results come back as UserMessages
-                content = message.content
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, ToolResultBlock):
-                            _broadcast_content_block(session_id, block)
+                else:
+                    # Permanent error or retries exhausted — classify and re-raise.
+                    # Pass the real CLI stderr + exit code so we don't bury a
+                    # transient as 'permanent_error'.
+                    error_type = _classify_error(
+                        query_exc, stderr=live_stderr, exit_code=exit_code,
+                    )
+                    try:
+                        conn = await db.get_db()
+                        await conn.execute(
+                            "UPDATE agent_sessions SET retry_count=?, last_error=?, error_type=? WHERE id=?",
+                            (retry_count, str(query_exc)[:500], error_type, session_id),
+                        )
+                        await conn.commit()
+                        await conn.close()
+                    except Exception:
+                        pass
 
-            elif isinstance(message, ResultMessage):
-                # Final result with usage/cost
-                result_text = getattr(message, "result", "") or ""
-                if result_text:
-                    combined = "".join(output_chunks)
-                    if result_text not in combined:
-                        output_chunks.append(result_text)
-                        _broadcast(session_id, {"type": "text", "text": "\n" + result_text})
+                    if retry_count > 0:
+                        log.error(
+                            "Session %s: exhausted %d retries (error_type=%s). Last error: %s",
+                            session_id, retry_count, error_type, query_exc,
+                        )
+                    raise
 
-                # Extract cost and usage — ResultMessage has direct attrs
-                usage = message.usage  # dict or None
-                cost = message.total_cost_usd  # float or None
-                input_t = 0
-                output_t = 0
-                if usage and isinstance(usage, dict):
-                    input_t = usage.get("input_tokens", 0) or 0
-                    output_t = usage.get("output_tokens", 0) or 0
-                    total_tokens = existing_tokens + input_t + output_t
-                if cost:
-                    total_cost = existing_cost + cost
-                if cost or usage:
-                    _broadcast(session_id, {
-                        "type": "usage",
-                        "usage": {"input_tokens": input_t, "output_tokens": output_t},
-                        "cost": total_cost,
-                    })
-
-        # Agent finished successfully
+        # ── Agent stream ended without raising. NOT yet 'completed' — must validate. ──
         full_output = "".join(output_chunks)
         if existing_output:
             full_output = existing_output + "\n--- RESUMED ---\n" + full_output
         ended_at = datetime.now(timezone.utc).isoformat()
 
-        # Check for report from MCP submit_report tool (writes JSON file)
+        # Pick up structured report (MCP submit_report tool, then text-marker fallback)
         report_data = _read_report_file(session_id)
-        # Fallback: try parsing from text markers (backward compat)
         if not report_data:
             report_data = _parse_report_from_text(full_output)
+
+        # cwd-escape detection: did the agent write files into master's working
+        # tree instead of the isolated worktree? Files there get lost on next
+        # worktree creation since worktrees are spawned from HEAD, not the WD.
+        escape_recovered_files: list[str] = []
+        escape_error_msg = ""
+        if worktree_path:
+            try:
+                post_master_status = await _master_status_lines(project_path)
+                escaped = post_master_status - pre_master_status
+                if escaped:
+                    ok_rec, rec_msg, rec_files = await _recover_cwd_escape(
+                        project_path, session_id, escaped,
+                    )
+                    if ok_rec:
+                        escape_recovered_files = rec_files
+                    else:
+                        escape_error_msg = rec_msg
+            except Exception as e:
+                log.warning("Failed cwd-escape check/recovery for %s: %s", session_id, e)
+
+        # Did the worktree branch accumulate real commits?
+        worktree_had_commits = False
+        if worktree_path:
+            try:
+                worktree_had_commits = await _worktree_had_commits(project_path, session_id)
+            except Exception as e:
+                log.warning("Failed to check worktree commits for %s: %s", session_id, e)
+
+        # Validate real work was done. Recovered cwd-escape files count as "work
+        # on master", so treat as worktree_had_commits=True for validation purposes.
+        validation_ok, validation_reason = _validate_completion(
+            total_tokens, total_cost, output_chunks, report_data,
+            worktree_had_commits or bool(escape_recovered_files),
+        )
+
+        # Try to merge if validation passed; on merge failure → mission fails as merge_blocked
+        merge_failed = False
+        merge_error_msg = ""
+        if validation_ok and worktree_path:
+            merge_result = await cleanup_worktree(project_path, session_id, merge=True)
+            if merge_result is False:
+                merge_failed = True
+                merge_error_msg = (
+                    f"Auto-merge of devfleet/{session_id[:8]} into master failed "
+                    f"(uncommitted changes or conflict). Branch and worktree preserved "
+                    f"at {worktree_path}. Use recover_mission to retry from chat."
+                )
+        elif not validation_ok and worktree_path:
+            log.warning(
+                "Session %s validation failed; preserving worktree at %s for inspection",
+                session_id, worktree_path,
+            )
+
+        # Determine final status
+        if not validation_ok:
+            final_status = "failed"
+            error_type = (
+                _classify_error(last_transient_error) if last_transient_error else "no_work_done"
+            )
+            last_error = validation_reason
+        elif merge_failed:
+            final_status = "failed"
+            error_type = "merge_blocked"
+            last_error = merge_error_msg
+        elif escape_error_msg:
+            # Recovery itself failed — flag clearly
+            final_status = "failed"
+            error_type = "cwd_escape_unrecovered"
+            last_error = (
+                f"Agent wrote outside the worktree but auto-recovery failed: {escape_error_msg}. "
+                f"Manual recovery needed on the DGX."
+            )
+        else:
+            final_status = "completed"
+            error_type = "cwd_escape_recovered" if escape_recovered_files else ""
+            last_error = (
+                f"Agent's writes bypassed the worktree (likely a model-specific tool-cwd "
+                f"quirk). Auto-recovered {len(escape_recovered_files)} file(s) by direct "
+                f"commit on master: {', '.join(escape_recovered_files[:5])}"
+                f"{'...' if len(escape_recovered_files) > 5 else ''}"
+            ) if escape_recovered_files else ""
 
         conn = await db.get_db()
         try:
             await conn.execute(
                 """UPDATE agent_sessions
-                   SET status='completed', ended_at=?, exit_code=0, output_log=?,
-                       total_cost_usd=?, total_tokens=?
+                   SET status=?, ended_at=?, exit_code=?, output_log=?,
+                       total_cost_usd=?, total_tokens=?, last_error=?, error_type=?
                    WHERE id=?""",
-                (ended_at, full_output, total_cost, total_tokens, session_id),
+                (final_status, ended_at, 0 if final_status == "completed" else 1,
+                 full_output, total_cost, total_tokens,
+                 last_error, error_type, session_id),
             )
             await conn.execute(
-                "UPDATE missions SET status='completed', updated_at=? WHERE id=?",
-                (ended_at, mission["id"]),
+                "UPDATE missions SET status=?, updated_at=? WHERE id=?",
+                (final_status, ended_at, mission["id"]),
             )
 
-            if report_data:
+            # Only store report on a clean success
+            if report_data and final_status == "completed":
                 report_id = str(uuid.uuid4())
                 await conn.execute(
                     """INSERT INTO reports
@@ -498,15 +983,36 @@ async def _run_agent(
         finally:
             await conn.close()
 
-        # Cleanup worktree — auto-merge if successful
-        if worktree_path:
-            await cleanup_worktree(project_path, session_id, merge=True)
-
-        _broadcast(session_id, {
-            "type": "done", "status": "completed", "exit_code": 0,
+        broadcast_payload = {
+            "type": "done", "status": final_status,
+            "exit_code": 0 if final_status == "completed" else 1,
             "cost": total_cost, "tokens": total_tokens,
-        })
-        log.info("Session %s completed (cost $%.4f, tokens %d)", session_id, total_cost, total_tokens)
+        }
+        if final_status == "failed":
+            broadcast_payload["error"] = last_error
+            broadcast_payload["error_type"] = error_type
+        _broadcast(session_id, broadcast_payload)
+
+        log.info(
+            "Session %s %s (cost $%.4f, tokens %d, error_type=%s)",
+            session_id, final_status, total_cost, total_tokens, error_type or "none",
+        )
+
+        # Fire post_complete or post_fail hooks + webhook callback
+        from plugins import run_hooks
+        if final_status == "completed":
+            await run_hooks("post_complete", mission, report_data or {})
+            await _fire_callback(mission, "completed", report_data)
+        else:
+            fail_payload = {
+                "error": last_error,
+                "error_type": error_type,
+                "tokens_used": total_tokens,
+                "cost_usd": total_cost,
+                "retry_count": retry_count,
+            }
+            await run_hooks("post_fail", mission, fail_payload)
+            await _fire_callback(mission, "failed", fail_payload)
 
     except asyncio.CancelledError:
         is_takeover = session_id in _takeover_sessions
@@ -519,13 +1025,16 @@ async def _run_agent(
 
         new_status = "takeover" if is_takeover else "cancelled"
         mission_status = "running" if is_takeover else "failed"
+        cancel_reason = "Session taken over for human review" if is_takeover else "Session cancelled"
+        cancel_type = "takeover" if is_takeover else "cancelled"
         conn = await db.get_db()
         try:
             await conn.execute(
                 """UPDATE agent_sessions SET status=?, ended_at=?, output_log=?,
-                       total_cost_usd=?, total_tokens=?
+                       total_cost_usd=?, total_tokens=?, last_error=?, error_type=?
                    WHERE id=?""",
-                (new_status, ended_at, full_output, total_cost, total_tokens, session_id),
+                (new_status, ended_at, full_output, total_cost, total_tokens,
+                 cancel_reason, cancel_type, session_id),
             )
             await conn.execute(
                 "UPDATE missions SET status=?, updated_at=? WHERE id=?",
@@ -538,22 +1047,54 @@ async def _run_agent(
         if worktree_path and not is_takeover:
             # Only delete worktree on regular cancel, NOT on takeover
             await cleanup_worktree(project_path, session_id, merge=False)
-        _broadcast(session_id, {"type": "done", "status": new_status})
+        _broadcast(session_id, {
+            "type": "done", "status": new_status,
+            "error": cancel_reason, "error_type": cancel_type,
+        })
 
     except Exception as e:
-        log.exception("Session %s error: %s", session_id, e)
+        # Pull the real CLI stderr we tee'd to a per-session file; this is what
+        # the SDK hides behind "Check stderr output for details".
+        stderr_tail = _read_stderr_tail(session_id)
+        error_type = _classify_error(e, stderr=stderr_tail, exit_code=getattr(e, "exit_code", None))
+        log.exception("Session %s error (type=%s): %s", session_id, error_type, e)
         ended_at = datetime.now(timezone.utc).isoformat()
         full_output = "".join(output_chunks)
         if existing_output:
             full_output = existing_output + "\n--- RESUMED ---\n" + full_output
 
+        # Build a human-readable last_error — prefer real stderr over the placeholder
+        if error_type == "rate_limit_exhausted":
+            last_error = (
+                f"Anthropic rate limit hit and {DEFAULT_MAX_RETRIES} retries exhausted. "
+                f"Re-dispatch when quota resets. (Last error: {str(e)[:200]})"
+            )
+        elif error_type == "transient_exhausted":
+            last_error = (
+                f"Transient error retried {DEFAULT_MAX_RETRIES} times without success. "
+                f"(Last error: {str(e)[:200]})"
+            )
+        elif error_type == "unknown_early_exit":
+            last_error = (
+                "Claude CLI exited 1 within seconds of launch (likely transient — "
+                "API/MCP startup, env, or quota). Retries exhausted. "
+                f"Stderr tail: {stderr_tail[-800:] if stderr_tail else '(empty)'}"
+            )
+        else:
+            tail_suffix = f" — stderr: {stderr_tail[-600:]}" if stderr_tail else ""
+            last_error = f"Permanent error: {str(e)[:400]}{tail_suffix}"
+
+        # error_log gets the FULL stderr tail (not the placeholder) for postmortem
+        error_log_value = stderr_tail or str(e)
+
         conn = await db.get_db()
         try:
             await conn.execute(
                 """UPDATE agent_sessions SET status='failed', ended_at=?, output_log=?, error_log=?,
-                       total_cost_usd=?, total_tokens=?
+                       total_cost_usd=?, total_tokens=?, last_error=?, error_type=?
                    WHERE id=?""",
-                (ended_at, full_output, str(e), total_cost, total_tokens, session_id),
+                (ended_at, full_output, error_log_value, total_cost, total_tokens,
+                 last_error, error_type, session_id),
             )
             await conn.execute(
                 "UPDATE missions SET status='failed', updated_at=? WHERE id=?",
@@ -563,13 +1104,43 @@ async def _run_agent(
         finally:
             await conn.close()
 
+        # Preserve worktree on rate-limit / transient / early-exit-1 errors so
+        # resume_mission can pick up later. Cleanup only on truly permanent
+        # errors. Note `unknown_early_exit` is included: these usually self-heal
+        # on a re-dispatch, and the SDK occasionally produces them even after
+        # the agent did real work in an MCP tool call.
         if worktree_path:
-            await cleanup_worktree(project_path, session_id, merge=False)
-        _broadcast(session_id, {"type": "done", "status": "failed", "error": str(e)})
+            preserve = error_type in (
+                "rate_limit_exhausted", "transient_exhausted", "unknown_early_exit",
+            )
+            if not preserve:
+                await cleanup_worktree(project_path, session_id, merge=False)
+            else:
+                log.warning(
+                    "Session %s worktree preserved at %s for resume (error_type=%s)",
+                    session_id, worktree_path, error_type,
+                )
+
+        _broadcast(session_id, {
+            "type": "done", "status": "failed",
+            "error": last_error, "error_type": error_type,
+        })
+
+        # Fire post_fail hooks (plugins + webhook callback)
+        from plugins import run_hooks
+        fail_payload = {"error": last_error, "error_type": error_type,
+                        "tokens_used": total_tokens, "cost_usd": total_cost}
+        await run_hooks("post_fail", mission, fail_payload)
+        await _fire_callback(mission, "failed", fail_payload)
 
     finally:
         running_tasks.pop(session_id, None)
         _event_buffers.pop(session_id, None)
+        if stderr_file is not None:
+            try:
+                stderr_file.close()
+            except Exception:
+                pass
 
 
 async def dispatch_mission(

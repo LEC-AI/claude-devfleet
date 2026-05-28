@@ -442,6 +442,27 @@ async def _dispatch_mission(args: dict, conn) -> dict:
     }
 
 
+def _read_session_stderr_tail(session_id: str, max_chars: int = 2000) -> str:
+    """Read the tail of the per-session CLI stderr log captured by sdk_engine.
+
+    Mirrors `sdk_engine._stderr_log_path` so external MCP callers can read the
+    real diagnostic output behind a failed mission, not the SDK placeholder.
+    """
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(backend_dir, "..", "data", "logs", f"session-{session_id}.stderr.log")
+    if not os.path.exists(path):
+        return ""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size > max_chars:
+                f.seek(size - max_chars)
+                _ = f.readline()
+            return f.read().decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+
+
 async def _get_mission_status(args: dict, conn) -> dict:
     mid = args["mission_id"]
 
@@ -469,14 +490,26 @@ async def _get_mission_status(args: dict, conn) -> dict:
 
     if session:
         session = dict(session)
-        result["session"] = {
+        session_block = {
             "id": session["id"],
             "status": session["status"],
             "started_at": session["started_at"],
             "ended_at": session["ended_at"],
             "total_cost_usd": session["total_cost_usd"],
             "total_tokens": session["total_tokens"],
+            # Surface the failure-reason fields so external MCP callers can
+            # answer "why did mission X fail" without shell access to the DB.
+            "error_type": session.get("error_type") or "",
+            "last_error": session.get("last_error") or "",
+            "retry_count": session.get("retry_count") or 0,
         }
+        # On failure, include the captured CLI stderr tail — this is the real
+        # output behind the SDK's "Check stderr output for details" placeholder.
+        if session["status"] == "failed":
+            tail = _read_session_stderr_tail(session["id"])
+            if tail:
+                session_block["stderr_tail"] = tail
+        result["session"] = session_block
 
     return result
 
@@ -519,16 +552,29 @@ async def _list_missions(args: dict, conn) -> dict:
     pid = args["project_id"]
     status = args.get("status")
 
+    # LEFT JOIN to the latest agent_session so callers can see error_type /
+    # last_error per mission without an N+1 round-trip — lets a single call
+    # answer "which missions failed and why".
+    base_sql = (
+        "SELECT m.id, m.title, m.status, m.mission_number, m.depends_on, "
+        "       m.auto_dispatch, m.priority, m.created_at, "
+        "       s.error_type AS session_error_type, "
+        "       s.last_error AS session_last_error, "
+        "       s.id AS session_id "
+        "FROM missions m "
+        "LEFT JOIN agent_sessions s ON s.id = ("
+        "   SELECT id FROM agent_sessions WHERE mission_id = m.id "
+        "   ORDER BY started_at DESC LIMIT 1) "
+        "WHERE m.project_id = ? "
+    )
     if status:
         cur = await conn.execute(
-            "SELECT id, title, status, mission_number, depends_on, auto_dispatch, priority, created_at "
-            "FROM missions WHERE project_id = ? AND status = ? ORDER BY mission_number",
+            base_sql + "AND m.status = ? ORDER BY m.mission_number",
             (pid, status),
         )
     else:
         cur = await conn.execute(
-            "SELECT id, title, status, mission_number, depends_on, auto_dispatch, priority, created_at "
-            "FROM missions WHERE project_id = ? ORDER BY mission_number",
+            base_sql + "ORDER BY m.mission_number",
             (pid,),
         )
 
@@ -538,6 +584,11 @@ async def _list_missions(args: dict, conn) -> dict:
         m = dict(r)
         m["depends_on"] = json.loads(m["depends_on"] or "[]")
         m["auto_dispatch"] = bool(m["auto_dispatch"])
+        # Only include error fields when there's something useful to report
+        if not (m.get("session_error_type") or m.get("session_last_error")):
+            m.pop("session_error_type", None)
+            m.pop("session_last_error", None)
+            m.pop("session_id", None)
         missions.append(m)
 
     return {"missions": missions, "count": len(missions)}

@@ -248,8 +248,14 @@ async def create_project(body: ProjectCreate):
     conn = await db.get_db()
     try:
         await conn.execute(
-            "INSERT INTO projects (id, name, path, description) VALUES (?, ?, ?, ?)",
-            (pid, body.name, body.path, body.description),
+            """INSERT INTO projects
+               (id, name, path, description, system_prompt,
+                state, owner, start_date, target_end_date,
+                parent_team, teams_channel_id, teams_channel_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (pid, body.name, body.path, body.description, body.system_prompt,
+             body.state or "active", body.owner, body.start_date, body.target_end_date,
+             body.parent_team, body.teams_channel_id, body.teams_channel_name),
         )
         await conn.commit()
         row = await conn.execute_fetchall("SELECT * FROM projects WHERE id=?", (pid,))
@@ -441,6 +447,71 @@ async def list_children(mid: str):
             (mid,),
         )
         return [dict(r) for r in rows]
+    finally:
+        await conn.close()
+
+
+@app.get("/api/missions/{mid}/report")
+async def get_mission_report(mid: str, log_tail_bytes: int = 4096):
+    """Flattened single-call mission retrieval — status + structured report
+    + cost + exit code + tail of agent output_log. Designed so an MCP wrapper
+    can surface a mission result with one HTTP call instead of three.
+
+    log_tail_bytes caps how much of agent_sessions.output_log is returned
+    (default 4KB) — enough to surface the agent's final chat reply when no
+    structured report was written, without blowing up the response."""
+    conn = await db.get_db()
+    try:
+        m_rows = await conn.execute_fetchall(
+            "SELECT id, title, status, model, created_at, updated_at "
+            "FROM missions WHERE id=?",
+            (mid,),
+        )
+        if not m_rows:
+            raise HTTPException(404, "Mission not found")
+        m = dict(m_rows[0])
+
+        s_rows = await conn.execute_fetchall(
+            "SELECT id, status, started_at, ended_at, exit_code, output_log, "
+            "error_log, total_cost_usd, total_tokens "
+            "FROM agent_sessions WHERE mission_id=? "
+            "ORDER BY started_at DESC LIMIT 1",
+            (mid,),
+        )
+        s = dict(s_rows[0]) if s_rows else {}
+
+        r_rows = await conn.execute_fetchall(
+            "SELECT files_changed, what_done, what_open, what_tested, "
+            "what_untested, next_steps, errors_encountered, preview_url, "
+            "created_at FROM reports WHERE mission_id=? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (mid,),
+        )
+        rep = dict(r_rows[0]) if r_rows else None
+
+        output_log = s.get("output_log") or ""
+        error_log = s.get("error_log") or ""
+
+        return {
+            "mission_id": mid,
+            "title": m.get("title"),
+            "status": m.get("status"),
+            "model": m.get("model"),
+            "created_at": m.get("created_at"),
+            "updated_at": m.get("updated_at"),
+            "session": {
+                "session_id": s.get("id"),
+                "started_at": s.get("started_at"),
+                "ended_at": s.get("ended_at"),
+                "exit_code": s.get("exit_code"),
+                "total_cost_usd": s.get("total_cost_usd"),
+                "total_tokens": s.get("total_tokens"),
+                "error_log_tail": error_log[-log_tail_bytes:] if error_log else None,
+                "output_log_tail": output_log[-log_tail_bytes:] if output_log else None,
+                "output_log_truncated": len(output_log) > log_tail_bytes,
+            } if s else None,
+            "report": rep,
+        }
     finally:
         await conn.close()
 
@@ -689,6 +760,128 @@ async def resume(mid: str, body: DispatchOptions | None = None):
     running_tasks[session_id] = task
 
     return {"session_id": session_id, "status": "running", "resumed": True}
+
+
+@app.post("/api/missions/{mid}/recover")
+async def recover_mission_endpoint(mid: str):
+    """Recover a merge_blocked or cwd_escape_unrecovered mission: stash uncommitted
+    master changes, merge devfleet/<short-id>, restore stash. Idempotent —
+    safe to call twice."""
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT m.*, p.path AS project_path FROM missions m JOIN projects p ON p.id=m.project_id WHERE m.id=?",
+            (mid,),
+        )
+        if not rows:
+            raise HTTPException(404, "Mission not found")
+        mission = dict(rows[0])
+
+        sess_rows = await conn.execute_fetchall(
+            """SELECT id, error_type, last_error FROM agent_sessions
+               WHERE mission_id=? ORDER BY started_at DESC LIMIT 1""",
+            (mid,),
+        )
+        if not sess_rows:
+            raise HTTPException(400, "No session to recover")
+        sess = dict(sess_rows[0])
+        if sess.get("error_type") not in ("merge_blocked", "cwd_escape_unrecovered"):
+            raise HTTPException(
+                400,
+                f"Mission error_type is {sess.get('error_type') or 'none'}; "
+                f"recover only works on merge_blocked or cwd_escape_unrecovered",
+            )
+        session_id = sess["id"]
+    finally:
+        await conn.close()
+
+    project_path = resolve_path(mission["project_path"])
+    short_id = session_id[:8]
+    branch_name = f"devfleet/{short_id}"
+    worktree_path = os.path.join(project_path, ".devfleet-worktrees", f"session-{short_id}")
+
+    async def _git(*args: str) -> tuple[int, str, str]:
+        proc = await asyncio.create_subprocess_exec(
+            "git", *args, cwd=project_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await proc.communicate()
+        return proc.returncode, out.decode().strip(), err.decode().strip()
+
+    # Verify the branch still exists
+    code, _, _ = await _git("rev-parse", "--verify", branch_name)
+    if code != 0:
+        raise HTTPException(
+            410,
+            f"Recovery branch {branch_name} no longer exists. "
+            f"Re-dispatch the mission as a new one.",
+        )
+
+    # Stash master's working tree if dirty (untracked + tracked)
+    code, status_out, _ = await _git("status", "--porcelain")
+    stashed = False
+    if status_out.strip():
+        code, _, err = await _git("stash", "push", "-u", "-m", f"devfleet recover {short_id}")
+        if code != 0:
+            raise HTTPException(500, f"git stash failed: {err[:300]}")
+        stashed = True
+
+    # Try to merge
+    code, _, merge_err = await _git(
+        "merge", "--no-ff", "-m", f"Claude DevFleet: recover-merge session {short_id}", branch_name,
+    )
+    if code != 0:
+        await _git("merge", "--abort")
+        if stashed:
+            await _git("stash", "pop")
+        raise HTTPException(
+            409,
+            f"Merge still failed: {merge_err[:400]}. "
+            f"There's a real conflict between master and the agent's branch — "
+            f"manual resolution needed on the DGX.",
+        )
+
+    # Merge succeeded. Clean up worktree + branch.
+    await _git("worktree", "remove", "--force", worktree_path)
+    await _git("branch", "-D", branch_name)
+
+    # Restore stash if we stashed
+    pop_warning = ""
+    if stashed:
+        code, _, pop_err = await _git("stash", "pop")
+        if code != 0:
+            pop_warning = (
+                f"Merge succeeded but git stash pop had conflicts: {pop_err[:200]}. "
+                f"Your previously-uncommitted master changes are still in `git stash list` — "
+                f"resolve them manually."
+            )
+
+    # Update DB to reflect successful recovery
+    conn = await db.get_db()
+    try:
+        await conn.execute(
+            """UPDATE agent_sessions SET status='completed', exit_code=0,
+                   last_error=?, error_type=''
+               WHERE id=?""",
+            (
+                f"Recovered via /api/missions/{mid}/recover" + (f" — {pop_warning}" if pop_warning else ""),
+                session_id,
+            ),
+        )
+        await conn.execute(
+            "UPDATE missions SET status='completed', updated_at=? WHERE id=?",
+            (datetime.now(timezone.utc).isoformat(), mid),
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+    return {
+        "ok": True,
+        "mission_id": mid,
+        "branch_merged": branch_name,
+        "stash_warning": pop_warning,
+    }
 
 
 # ──────────────────────────────────────────────
