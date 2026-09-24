@@ -2,6 +2,7 @@ import asyncio
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 from fastapi import FastAPI
@@ -181,6 +182,46 @@ def test_mission_outcome_is_latest_session_and_cost_covers_every_run(seed):
     assert "[cancelled] #3 Cancelled mission" in result["summary_text"]
 
 
+def test_fractional_window_bounds_are_kept_exactly(seed):
+    pid = seed.project("Alpha")
+    two_am = night(4)
+    half_past = two_am + timedelta(milliseconds=500)
+    seed.session(seed.mission(pid, "At 02:00:00.0 (iso)"), "completed", iso_ts(two_am), 1.0, 10)
+    seed.session(seed.mission(pid, "At 02:00:00.0 (sqlite)"), "completed", sql_ts(two_am), 2.0, 20)
+    seed.session(seed.mission(pid, "At 02:00:00.5"), "completed", iso_ts(half_past), 4.0, 40)
+
+    # since = 02:00:00.5 excludes both sessions that ended at 02:00:00.0
+    later = run(build_nightly_summary(pid, half_past, UNTIL))
+    assert later["total_cost_usd"] == pytest.approx(4.0)
+    assert later["window_start"] == half_past.isoformat()
+
+    # until = 02:00:00.5 is exclusive, so only the 02:00:00.0 sessions count
+    earlier = run(build_nightly_summary(pid, SINCE, half_past))
+    assert earlier["total_cost_usd"] == pytest.approx(3.0)
+    assert earlier["window_end"] == half_past.isoformat()
+
+
+def test_rerunning_a_window_replaces_its_row(seed):
+    pid = seed.project("Alpha")
+    seed.session(seed.mission(pid, "Early"), "completed", sql_ts(night(3)), 1.0, 10)
+    first = run(build_nightly_summary(pid, SINCE, UNTIL))
+
+    # Late-arriving data, then a manual rerun of the same window
+    seed.session(seed.mission(pid, "Late"), "completed", sql_ts(night(5)), 2.0, 20)
+    second = run(build_nightly_summary(pid, SINCE, UNTIL))
+
+    assert second["id"] == first["id"]
+    assert second["missions_completed"] == 2
+    assert second["total_cost_usd"] == pytest.approx(3.0)
+    stored = run(list_nightly_runs(pid))
+    assert len(stored) == 1
+    assert stored[0]["total_cost_usd"] == pytest.approx(3.0)
+    assert "Late" in stored[0]["summary_text"]
+
+    # The automatic hook leaves an existing row alone
+    assert run(maybe_run_nightly_summary(since=SINCE, until=UNTIL)) == []
+
+
 def test_empty_window_still_produces_a_row(seed):
     pid = seed.project("Quiet")
     result = run(build_nightly_summary(pid, SINCE, UNTIL))
@@ -221,6 +262,19 @@ def test_last_closed_window_same_day():
         datetime(2030, 1, 1, 1, 0, tzinfo=UTC), datetime(2030, 1, 1, 5, 0, tzinfo=UTC))
 
 
+def test_last_closed_window_in_local_time_follows_dst():
+    try:
+        london = ZoneInfo("Europe/London")
+    except ZoneInfoNotFoundError:
+        pytest.skip("no tz database available")
+    # Summer (BST, UTC+1): 22:00–06:00 London is 21:00–05:00 UTC
+    assert last_closed_window(datetime(2030, 7, 2, 6, 30, tzinfo=UTC), "22:00", "06:00", london) == (
+        datetime(2030, 7, 1, 21, 0, tzinfo=UTC), datetime(2030, 7, 2, 5, 0, tzinfo=UTC))
+    # Winter (GMT): the same wall-clock window is 22:00–06:00 UTC
+    assert last_closed_window(datetime(2030, 1, 2, 6, 30, tzinfo=UTC), "22:00", "06:00", london) == (
+        SINCE, UNTIL)
+
+
 # ── maybe_run_nightly_summary ──
 
 def test_maybe_run_summarizes_active_projects_once(seed, monkeypatch):
@@ -240,6 +294,45 @@ def test_maybe_run_summarizes_active_projects_once(seed, monkeypatch):
     assert len(run(list_nightly_runs(alpha))) == 1
     assert len(run(list_nightly_runs(beta))) == 1
     assert run(list_nightly_runs(idle)) == []
+
+
+def test_concurrent_hook_calls_store_one_row_per_window(seed, monkeypatch):
+    alpha, beta = seed.project("Alpha"), seed.project("Beta")
+    seed.session(seed.mission(alpha, "A1"), "completed", sql_ts(night(3)), 1.0, 10)
+    seed.session(seed.mission(beta, "B1"), "completed", sql_ts(night(4)), 2.0, 20)
+    find_eligible = nightly_summary._unsummarized_projects
+
+    async def overlapping_calls():
+        barrier = asyncio.Barrier(2)
+
+        async def find_then_wait(*args, **kwargs):
+            eligible = await find_eligible(*args, **kwargs)
+            await barrier.wait()  # both calls finish their eligibility read before either writes
+            return eligible
+
+        monkeypatch.setattr(nightly_summary, "_unsummarized_projects", find_then_wait)
+        return await asyncio.gather(
+            maybe_run_nightly_summary(since=SINCE, until=UNTIL),
+            maybe_run_nightly_summary(since=SINCE, until=UNTIL),
+        )
+
+    first, second = run(overlapping_calls())
+
+    created = [r["project_id"] for r in first + second]
+    assert sorted(created) == sorted([alpha, beta])  # each project created exactly once
+    assert len(run(list_nightly_runs(alpha))) == 1
+    assert len(run(list_nightly_runs(beta))) == 1
+
+
+def test_maybe_run_can_be_scoped_to_projects(seed):
+    alpha, beta = seed.project("Alpha"), seed.project("Beta")
+    seed.session(seed.mission(alpha, "A1"), "completed", sql_ts(night(3)), 1.0, 10)
+    seed.session(seed.mission(beta, "B1"), "completed", sql_ts(night(4)), 2.0, 20)
+
+    created = run(maybe_run_nightly_summary(since=SINCE, until=UNTIL, project_ids=[alpha]))
+
+    assert [r["project_id"] for r in created] == [alpha]
+    assert run(list_nightly_runs(beta)) == []
 
 
 def test_maybe_run_requires_both_bounds(temp_db):
@@ -275,6 +368,13 @@ def test_api_run_then_list(seed, client):
     assert resp.status_code == 200
     runs = resp.json()
     assert [r["id"] for r in runs] == [body["id"]]
+
+    # Rerunning the same window replaces the row instead of adding one
+    rerun = client.post(f"/api/projects/{pid}/nightly-runs/run",
+                        json={"since": SINCE.isoformat(), "until": UNTIL.isoformat()})
+    assert rerun.status_code == 201
+    assert rerun.json()["id"] == body["id"]
+    assert len(client.get(f"/api/projects/{pid}/nightly-runs").json()) == 1
 
 
 def test_api_run_defaults_to_last_24_hours(seed, client):
