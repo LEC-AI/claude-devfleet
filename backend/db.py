@@ -149,6 +149,21 @@ CREATE TABLE IF NOT EXISTS mcp_configs (
 
 CREATE INDEX IF NOT EXISTS idx_mcp_configs_project
     ON mcp_configs(project_id);
+
+-- Track 4: Capacity Manager — day/night concurrency caps, global (project_id NULL) or per-project.
+-- window_id references a Track 2 night_windows row (nullable; no FK, that table is owned by another track).
+CREATE TABLE IF NOT EXISTS capacity_config (
+    id TEXT PRIMARY KEY,
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    day_limit INTEGER NOT NULL,
+    night_limit INTEGER NOT NULL,
+    window_id TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_capacity_config_project
+    ON capacity_config(project_id);
 """
 
 
