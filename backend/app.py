@@ -20,6 +20,7 @@ from models import (ProjectCreate, ProjectUpdate, MissionCreate, MissionUpdate,
 import health_checker
 import mission_watcher
 import scheduler
+import routes_swarm_tree
 from autoloop import start_auto_loop, stop_auto_loop, get_auto_loop_status
 from remote_control import (start_remote_control, stop_remote_control,
                             get_remote_status, list_remote_sessions, cleanup_all as cleanup_remote,
@@ -76,6 +77,9 @@ app.add_middleware(
 )
 
 MAX_CONCURRENT_AGENTS = int(os.environ.get("DEVFLEET_MAX_AGENTS", "3"))
+
+# Feature routers (additive, read-only)
+app.include_router(routes_swarm_tree.router)
 
 
 # ──────────────────────────────────────────────

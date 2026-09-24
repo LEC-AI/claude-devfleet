@@ -8,13 +8,15 @@ latest agent session. Everything here is a plain SELECT over the existing
 ``missions`` and ``agent_sessions`` tables — no new schema, no writes, and no
 imports from the dispatch/loop modules.
 
-Integration (one line in app.py):
-
-    import routes_swarm_tree
-    app.include_router(routes_swarm_tree.router)
+Cycle safety: ``parent_mission_id`` is free-form, so a corrupt row can form a
+cycle (A → B → A). The recursive query carries the path it walked and refuses
+to re-enter any id already on it (the root included), and results are de-duplicated
+by id as a second line of defence. A cycle back into the root is reported as
+``cycle_detected``; legitimately deep chains are cut at ``MAX_DEPTH`` and reported
+as ``truncated``.
 
 Endpoints:
-    GET /api/swarms                 — list swarm roots (missions tagged swarm_root)
+    GET /api/swarms                 — swarm roots (missions tagged swarm_root), paginated
     GET /api/swarms/{id}/tree       — root + full descendant tree with roll-up
 """
 import json
@@ -30,6 +32,8 @@ SWARM_ROOT_TAG = "swarm_root"
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 BASE_STATUSES = ("draft", "running", "completed", "failed", "cancelled")
 MAX_DEPTH = 20
+LIST_DEFAULT_LIMIT = 50
+LIST_MAX_LIMIT = 200
 
 
 # ──────────────────────────────────────────────
@@ -84,12 +88,18 @@ def _node(row: dict, depth: int, completed_ids: set) -> dict:
 
 
 def _summarize(children: list[dict]) -> dict:
+    """Roll-up over a swarm's descendants (root excluded).
+
+    ``total_cost_usd`` / ``total_tokens`` sum each mission's *latest* session only —
+    retried attempts are not included. The UI labels it accordingly.
+    """
     counts = {s: 0 for s in BASE_STATUSES}
     cost = 0.0
     tokens = 0
     blocked = 0
     for c in children:
-        counts[c["status"] or "unknown"] = counts.get(c["status"] or "unknown", 0) + 1
+        key = c["status"] or "unknown"
+        counts[key] = counts.get(key, 0) + 1
         sess = c.get("latest_session")
         if sess:
             cost += sess["total_cost_usd"]
@@ -102,6 +112,7 @@ def _summarize(children: list[dict]) -> dict:
         "blocked": blocked,
         "total_cost_usd": round(cost, 6),
         "total_tokens": tokens,
+        "cost_basis": "latest_session",
         "is_active": any((c["status"] not in TERMINAL_STATUSES) for c in children),
     }
 
@@ -131,45 +142,67 @@ _NODE_COLUMNS = """
 """
 
 
-async def _fetch_subtree(conn, root_id: str) -> tuple[list[dict], bool]:
-    """All descendants of root_id (root excluded), ordered depth → created_at → id.
+async def _fetch_subtrees(conn, root_ids: list[str]) -> tuple[dict[str, list[dict]], set[str]]:
+    """Descendants of every root in ``root_ids`` (roots excluded), in ONE query.
 
-    Returns (rows, truncated) where truncated is True if MAX_DEPTH was hit.
+    Returns ({root_id: rows ordered depth → created_at → id}, truncated_root_ids).
+    The walk carries its path (",root,child,grandchild,") and never re-enters an id
+    already on it, so a parent cycle cannot produce repeated rows or re-enter the root.
     """
+    if not root_ids:
+        return {}, set()
+    placeholders = ",".join("?" for _ in root_ids)
     rows = await conn.execute_fetchall(
         f"""
-        WITH RECURSIVE tree(id, depth) AS (
-            SELECT id, 1 FROM missions WHERE parent_mission_id = ?
+        WITH RECURSIVE tree(root_id, id, depth, path) AS (
+            SELECT parent_mission_id, id, 1, ',' || parent_mission_id || ',' || id || ','
+            FROM missions
+            WHERE parent_mission_id IN ({placeholders})
             UNION ALL
-            SELECT c.id, t.depth + 1
+            SELECT t.root_id, c.id, t.depth + 1, t.path || c.id || ','
             FROM missions c JOIN tree t ON c.parent_mission_id = t.id
             WHERE t.depth < ?
+              AND instr(t.path, ',' || c.id || ',') = 0
         )
-        SELECT t.depth, {_NODE_COLUMNS}
+        SELECT t.root_id, t.depth, {_NODE_COLUMNS}
         FROM tree t
         JOIN missions m ON m.id = t.id
         {_LATEST_SESSION_JOIN}
-        ORDER BY t.depth, m.created_at, m.id
+        ORDER BY t.root_id, t.depth, m.created_at, m.id
         """,
-        (root_id, MAX_DEPTH + 1),
+        (*root_ids, MAX_DEPTH + 1),
     )
-    rows = [dict(r) for r in rows]
-    truncated = any(r["depth"] > MAX_DEPTH for r in rows)
-    rows = [r for r in rows if r["depth"] <= MAX_DEPTH]
-    return rows, truncated
+
+    by_root: dict[str, list[dict]] = {rid: [] for rid in root_ids}
+    seen: dict[str, set[str]] = {rid: {rid} for rid in root_ids}
+    truncated: set[str] = set()
+    for r in rows:
+        r = dict(r)
+        rid = r["root_id"]
+        if r["depth"] > MAX_DEPTH:
+            truncated.add(rid)
+            continue
+        if r["id"] in seen[rid]:      # belt-and-braces: never emit an id twice
+            continue
+        seen[rid].add(r["id"])
+        by_root[rid].append(r)
+    return by_root, truncated
 
 
-async def _fetch_mission(conn, mission_id: str) -> dict | None:
+async def _fetch_missions(conn, ids: list[str]) -> dict[str, dict]:
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
     rows = await conn.execute_fetchall(
         f"""
         SELECT {_NODE_COLUMNS}
         FROM missions m
         {_LATEST_SESSION_JOIN}
-        WHERE m.id = ?
+        WHERE m.id IN ({placeholders})
         """,
-        (mission_id,),
+        tuple(ids),
     )
-    return dict(rows[0]) if rows else None
+    return {r["id"]: dict(r) for r in rows}
 
 
 async def _completed_ids(conn, ids: set[str]) -> set[str]:
@@ -184,70 +217,93 @@ async def _completed_ids(conn, ids: set[str]) -> set[str]:
     return {r["id"] for r in rows}
 
 
+async def _assemble(conn, root_row: dict, child_rows: list[dict], truncated: bool) -> dict:
+    dep_ids: set[str] = set()
+    for r in child_rows:
+        if r.get("status") == "draft":
+            dep_ids.update(_parse_json_list(r.get("depends_on")))
+    completed = {r["id"] for r in child_rows if r.get("status") == "completed"}
+    completed |= await _completed_ids(conn, dep_ids - completed)
+
+    root = _node(root_row, 0, completed)
+    children = [_node(r, r["depth"], completed) for r in child_rows]
+    child_ids = {c["id"] for c in children}
+    # Every reachable node was entered through its one real parent, so the only way a
+    # cycle can touch this tree is the root's own parent pointing back into it.
+    cycle_detected = root["parent_mission_id"] in child_ids
+
+    return {
+        "root": root,
+        "is_swarm_root": SWARM_ROOT_TAG in root["tags"],
+        "missions": children,
+        "summary": _summarize(children),
+        "truncated": truncated,
+        "cycle_detected": cycle_detected,
+        "max_depth": MAX_DEPTH,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 async def build_tree(root_id: str) -> dict:
     """Core logic, callable without HTTP (used by the test file)."""
     conn = await db.get_db()
     try:
-        root_row = await _fetch_mission(conn, root_id)
+        root_row = (await _fetch_missions(conn, [root_id])).get(root_id)
         if root_row is None:
             raise HTTPException(404, "Mission not found")
-
-        child_rows, truncated = await _fetch_subtree(conn, root_id)
-
-        dep_ids: set[str] = set()
-        for r in child_rows:
-            if r.get("status") == "draft":
-                dep_ids.update(_parse_json_list(r.get("depends_on")))
-        completed = {r["id"] for r in child_rows if r.get("status") == "completed"}
-        completed |= await _completed_ids(conn, dep_ids - completed)
-
-        root = _node(root_row, 0, completed)
-        children = [_node(r, r["depth"], completed) for r in child_rows]
-
-        return {
-            "root": root,
-            "is_swarm_root": SWARM_ROOT_TAG in root["tags"],
-            "missions": children,
-            "summary": _summarize(children),
-            "truncated": truncated,
-            "max_depth": MAX_DEPTH,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-        }
+        by_root, truncated = await _fetch_subtrees(conn, [root_id])
+        return await _assemble(conn, root_row, by_root[root_id], root_id in truncated)
     finally:
         await conn.close()
 
 
-async def list_swarms(project_id: str | None = None) -> list[dict]:
-    """All missions tagged swarm_root (newest first), each with a roll-up."""
+async def list_swarms(project_id: str | None = None, limit: int = LIST_DEFAULT_LIMIT, offset: int = 0) -> dict:
+    """Missions tagged swarm_root (newest first), each with a roll-up, in three queries total."""
+    limit = max(1, min(int(limit), LIST_MAX_LIMIT))
+    offset = max(0, int(offset))
     conn = await db.get_db()
     try:
-        query = f"""
-            SELECT {_NODE_COLUMNS}, p.name AS project_name
-            FROM missions m
-            JOIN projects p ON p.id = m.project_id
-            {_LATEST_SESSION_JOIN}
+        where = """
             WHERE json_valid(m.tags)
               AND EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value = ?)
         """
         params: list = [SWARM_ROOT_TAG]
         if project_id:
-            query += " AND m.project_id = ?"
+            where += " AND m.project_id = ?"
             params.append(project_id)
-        query += " ORDER BY m.created_at DESC, m.id DESC"
-        rows = [dict(r) for r in await conn.execute_fetchall(query, params)]
+
+        total = (await conn.execute_fetchall(
+            f"SELECT COUNT(*) AS n FROM missions m {where}", params))[0]["n"]
+
+        roots = [dict(r) for r in await conn.execute_fetchall(
+            f"""
+            SELECT {_NODE_COLUMNS}, p.name AS project_name
+            FROM missions m
+            JOIN projects p ON p.id = m.project_id
+            {_LATEST_SESSION_JOIN}
+            {where}
+            ORDER BY m.created_at DESC, m.id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (*params, limit, offset),
+        )]
+
+        by_root, truncated = await _fetch_subtrees(conn, [r["id"] for r in roots])
+        items = []
+        for r in roots:
+            tree = await _assemble(conn, r, by_root[r["id"]], r["id"] in truncated)
+            items.append({
+                **tree["root"],
+                "project_id": r["project_id"],
+                "project_name": r["project_name"],
+                "summary": tree["summary"],
+                "cycle_detected": tree["cycle_detected"],
+                "truncated": tree["truncated"],
+            })
     finally:
         await conn.close()
 
-    results = []
-    for r in rows:
-        tree = await build_tree(r["id"])
-        results.append({
-            **tree["root"],
-            "project_id": r["project_id"],
-            "project_name": r["project_name"],
-            "summary": tree["summary"],
-        })
-    return results
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 # ──────────────────────────────────────────────
@@ -255,9 +311,13 @@ async def list_swarms(project_id: str | None = None) -> list[dict]:
 # ──────────────────────────────────────────────
 
 @router.get("/swarms")
-async def api_list_swarms(project_id: str = Query(None)):
-    """List swarm roots (missions tagged ``swarm_root``) with a per-swarm status roll-up."""
-    return await list_swarms(project_id)
+async def api_list_swarms(
+    project_id: str = Query(None),
+    limit: int = Query(LIST_DEFAULT_LIMIT, ge=1, le=LIST_MAX_LIMIT),
+    offset: int = Query(0, ge=0),
+):
+    """Paginated swarm roots (missions tagged ``swarm_root``) with a per-swarm status roll-up."""
+    return await list_swarms(project_id, limit, offset)
 
 
 @router.get("/swarms/{swarm_id}/tree")

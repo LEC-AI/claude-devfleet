@@ -136,13 +136,21 @@ async def check_core():
     assert plain["root"]["tags"] == []  # malformed JSON tolerated
 
     # Listing swarms: only tagged roots, newest first, with roll-ups
-    roots = await swarm.list_swarms()
+    page = await swarm.list_swarms()
+    roots = page["items"]
+    assert page["total"] == 2 and page["limit"] == swarm.LIST_DEFAULT_LIMIT and page["offset"] == 0
     assert [r["id"] for r in roots] == [ROOT, OTHER_ROOT], [r["title"] for r in roots]
     assert roots[0]["summary"]["total"] == 4 and roots[1]["summary"]["total"] == 0
     assert roots[1]["summary"]["is_active"] is False
     assert roots[0]["project_name"] == "Swarm Test Project"
-    assert await swarm.list_swarms(project_id="nope") == []
-    assert len(await swarm.list_swarms(project_id=PROJECT)) == 2
+    assert roots[0]["summary"]["cost_basis"] == "latest_session"
+    assert (await swarm.list_swarms(project_id="nope"))["items"] == []
+    assert len((await swarm.list_swarms(project_id=PROJECT))["items"]) == 2
+    # pagination
+    p1 = await swarm.list_swarms(limit=1, offset=0)
+    p2 = await swarm.list_swarms(limit=1, offset=1)
+    assert [r["id"] for r in p1["items"]] == [ROOT] and [r["id"] for r in p2["items"]] == [OTHER_ROOT]
+    assert p1["total"] == 2 and (await swarm.list_swarms(limit=1, offset=5))["items"] == []
 
 
 async def check_completion_unblocks():
@@ -171,27 +179,73 @@ async def check_completion_unblocks():
     assert tree["summary"]["counts"]["completed"] == 4
 
 
-async def check_depth_cap():
-    """A cycle in parent_mission_id must terminate and report truncated=True."""
-    a, b = uid(), uid()
+async def check_cycles_and_depth():
+    """Parent cycles must yield a finite, duplicate-free tree with honest counts."""
+    a, b, c = uid(), uid(), uid()
     conn = await db.get_db()
     try:
+        # Root A whose parent points back at its own child B (A → B → A)
         await conn.execute(
             "INSERT INTO missions (id, project_id, title, detailed_prompt, status, parent_mission_id, tags) VALUES (?,?,?,?,?,?,?)",
             (a, PROJECT, "cycle a", "p", "draft", b, '["swarm_root"]'))
         await conn.execute(
             "INSERT INTO missions (id, project_id, title, detailed_prompt, status, parent_mission_id) VALUES (?,?,?,?,?,?)",
-            (b, PROJECT, "cycle b", "p", "draft", a))
+            (b, PROJECT, "cycle b", "p", "running", a))
+        # A legitimate child of B, to prove the walk continues past the guard
+        await conn.execute(
+            "INSERT INTO missions (id, project_id, title, detailed_prompt, status, parent_mission_id) VALUES (?,?,?,?,?,?)",
+            (c, PROJECT, "leaf c", "p", "completed", b))
         await conn.commit()
     finally:
         await conn.close()
+
     tree = await swarm.build_tree(a)
-    assert tree["truncated"] is True
-    assert len(tree["missions"]) == swarm.MAX_DEPTH
+    ids = [m["id"] for m in tree["missions"]]
+    assert ids == [b, c], ids                      # finite, each id exactly once, root never re-entered
+    assert len(ids) == len(set(ids))
+    assert tree["cycle_detected"] is True
+    assert tree["truncated"] is False
+    assert tree["summary"]["total"] == 2           # not inflated by repeated rows
+    assert tree["summary"]["counts"]["running"] == 1 and tree["summary"]["counts"]["completed"] == 1
+    # The same root through the list endpoint agrees
+    listed = next(r for r in (await swarm.list_swarms())["items"] if r["id"] == a)
+    assert listed["summary"]["total"] == 2 and listed["cycle_detected"] is True
+
+    # Viewed from B (a non-root member of the cycle) the walk also terminates: B → C, and B → A → (B blocked)
+    tree_b = await swarm.build_tree(b)
+    ids_b = [m["id"] for m in tree_b["missions"]]
+    assert sorted(ids_b) == sorted([a, c]) and len(ids_b) == 2, ids_b
+
+    # A legitimately deep chain is cut at MAX_DEPTH and flagged truncated, never cycle_detected
+    chain_root = uid()
+    conn = await db.get_db()
+    try:
+        await conn.execute(
+            "INSERT INTO missions (id, project_id, title, detailed_prompt, status, tags) VALUES (?,?,?,?,?,?)",
+            (chain_root, PROJECT, "deep root", "p", "draft", '["swarm_root"]'))
+        parent = chain_root
+        chain_ids = []
+        for i in range(swarm.MAX_DEPTH + 3):
+            mid = uid()
+            chain_ids.append(mid)
+            await conn.execute(
+                "INSERT INTO missions (id, project_id, title, detailed_prompt, status, parent_mission_id, created_at) VALUES (?,?,?,?,?,?,?)",
+                (mid, PROJECT, f"depth {i+1}", "p", "completed", parent, f"2026-09-24 02:{i:02d}:00"))
+            parent = mid
+        await conn.commit()
+    finally:
+        await conn.close()
+    deep = await swarm.build_tree(chain_root)
+    assert deep["truncated"] is True and deep["cycle_detected"] is False
+    assert len(deep["missions"]) == swarm.MAX_DEPTH
+    assert deep["missions"][-1]["depth"] == swarm.MAX_DEPTH
+
     # clean up so the HTTP checks see the original fixture
     conn = await db.get_db()
     try:
-        await conn.execute("DELETE FROM missions WHERE id IN (?,?)", (a, b))
+        await conn.execute("DELETE FROM missions WHERE id IN (?,?,?,?)", (a, b, c, chain_root))
+        placeholders = ",".join("?" for _ in chain_ids)
+        await conn.execute(f"DELETE FROM missions WHERE id IN ({placeholders})", tuple(chain_ids))
         await conn.commit()
     finally:
         await conn.close()
@@ -212,15 +266,19 @@ def check_http():
     assert "generated_at" in body
 
     r = client.get("/api/swarms")
-    assert r.status_code == 200 and [x["id"] for x in r.json()] == [ROOT, OTHER_ROOT]
+    assert r.status_code == 200 and [x["id"] for x in r.json()["items"]] == [ROOT, OTHER_ROOT]
     r = client.get(f"/api/swarms?project_id={PROJECT}")
-    assert len(r.json()) == 2
+    assert len(r.json()["items"]) == 2 and r.json()["total"] == 2
+    r = client.get("/api/swarms?limit=1&offset=1")
+    assert [x["id"] for x in r.json()["items"]] == [OTHER_ROOT]
+    assert client.get("/api/swarms?limit=0").status_code == 422
+    assert client.get(f"/api/swarms?limit={swarm.LIST_MAX_LIMIT + 1}").status_code == 422
 
 
 def main():
     asyncio.run(seed())
     asyncio.run(check_core())
-    asyncio.run(check_depth_cap())
+    asyncio.run(check_cycles_and_depth())
     check_http()
     asyncio.run(check_completion_unblocks())
     print("routes_swarm_tree: all checks passed")

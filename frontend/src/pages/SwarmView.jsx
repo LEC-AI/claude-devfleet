@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { listSwarms, getSwarmTree } from '../api/client';
 import StatusBadge from '../components/StatusBadge';
+import { buildChildMap, flattenTree, parentIds } from '../lib/swarmTree';
 
 const POLL_MS = 5000;
-const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
+const LIST_PAGE_SIZE = 25;
 
 const STATUS_COLOR = {
   completed: 'var(--success)',
@@ -12,6 +13,8 @@ const STATUS_COLOR = {
   cancelled: 'var(--text-dim)',
   draft: 'var(--border-strong)',
 };
+
+const COST_HINT = 'Sum of each mission’s latest session only. Earlier attempts (retries) are not included.';
 
 function statusColor(status) {
   return STATUS_COLOR[status] || 'var(--border)';
@@ -44,124 +47,103 @@ function timeAgo(dateStr) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-/** Build id → children[] from the flat list the API returns. */
-function buildChildMap(missions) {
-  const map = new Map();
-  for (const m of missions) {
-    const list = map.get(m.parent_mission_id) || [];
-    list.push(m);
-    map.set(m.parent_mission_id, list);
-  }
-  return map;
+function Warning({ children }) {
+  return (
+    <div style={{
+      padding: '8px 14px', marginBottom: 12, fontSize: 13,
+      background: 'var(--warning-soft)', color: 'var(--warning)', borderRadius: 'var(--radius-md)',
+    }}>
+      {children}
+    </div>
+  );
 }
 
 // ──────────────────────────────────────────────
-// Tree row
+// Tree row (flat — the tree is flattened iteratively, see lib/swarmTree.js)
 // ──────────────────────────────────────────────
 
-function TreeRow({ node, depth, childMap, collapsed, toggle, navigate, titleById }) {
-  const children = childMap.get(node.id) || [];
-  const hasChildren = children.length > 0;
-  const isCollapsed = collapsed.has(node.id);
+function TreeRow({ node, depth, hasChildren, childCount, isCollapsed, toggle, navigate, titleById }) {
   const blocked = node.blocked_on || [];
   const sess = node.latest_session;
 
   return (
-    <>
-      <div
-        className="card card-clickable"
-        onClick={() => navigate('mission', node.id)}
+    <div
+      className="card card-clickable"
+      onClick={() => navigate('mission', node.id)}
+      style={{
+        padding: '10px 14px',
+        marginLeft: depth * 24,
+        display: 'flex', alignItems: 'center', gap: 12,
+        borderLeft: `3px solid ${statusColor(node.status)}`,
+        opacity: node.status === 'cancelled' ? 0.6 : 1,
+      }}
+    >
+      <button
+        className="btn btn-ghost btn-sm"
+        onClick={(e) => { e.stopPropagation(); if (hasChildren) toggle(node.id); }}
+        title={hasChildren ? (isCollapsed ? 'Expand' : 'Collapse') : 'No sub-missions'}
         style={{
-          padding: '10px 14px',
-          marginLeft: depth * 24,
-          display: 'flex', alignItems: 'center', gap: 12,
-          borderLeft: `3px solid ${statusColor(node.status)}`,
-          opacity: node.status === 'cancelled' ? 0.6 : 1,
+          width: 24, height: 24, padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          visibility: hasChildren ? 'visible' : 'hidden',
         }}
       >
-        {/* Collapse toggle */}
-        <button
-          className="btn btn-ghost btn-sm"
-          onClick={(e) => { e.stopPropagation(); if (hasChildren) toggle(node.id); }}
-          title={hasChildren ? (isCollapsed ? 'Expand' : 'Collapse') : 'No sub-missions'}
-          style={{
-            width: 24, height: 24, padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
-            visibility: hasChildren ? 'visible' : 'hidden',
-          }}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
-            strokeLinecap="round" strokeLinejoin="round"
-            style={{ transform: isCollapsed ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.15s' }}>
-            <polyline points="9 18 15 12 9 6" />
-          </svg>
-        </button>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+          strokeLinecap="round" strokeLinejoin="round"
+          style={{ transform: isCollapsed ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.15s' }}>
+          <polyline points="9 18 15 12 9 6" />
+        </svg>
+      </button>
 
-        {/* Title + meta */}
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="truncate" style={{ fontWeight: 600, fontSize: 14 }}>
-            {node.title}
-            {hasChildren && (
-              <span className="text-muted" style={{ fontWeight: 400, fontSize: 12, marginLeft: 8 }}>
-                {children.length} sub-mission{children.length !== 1 ? 's' : ''}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-8" style={{ marginTop: 4, flexWrap: 'wrap' }}>
-            {node.mission_type && node.mission_type !== 'implement' && (
-              <span className="tag">{node.mission_type}</span>
-            )}
-            {node.auto_dispatch === 1 && (
-              <span style={{
-                fontSize: 10, fontWeight: 700, padding: '1px 7px',
-                background: 'rgba(34,197,94,0.1)', color: 'var(--success)', borderRadius: 'var(--radius-full)',
-              }}>AUTO</span>
-            )}
-            {blocked.length > 0 && (
-              <span
-                title={`Waiting on: ${blocked.map(id => titleById.get(id) || id.slice(0, 8)).join(', ')}`}
-                style={{
-                  fontSize: 11, padding: '1px 8px', borderRadius: 'var(--radius-full)',
-                  background: 'var(--info-soft)', color: 'var(--info)', fontWeight: 600,
-                }}
-              >
-                blocked on {blocked.length}
-              </span>
-            )}
-            {node.depends_on?.length > 0 && blocked.length === 0 && node.status === 'draft' && (
-              <span className="text-sm" style={{ fontSize: 11, color: 'var(--success)' }}>deps met</span>
-            )}
-            <span className="text-sm text-muted" style={{ fontSize: 11 }}>{timeAgo(node.updated_at)}</span>
-          </div>
-        </div>
-
-        {/* Cost / tokens */}
-        <div className="font-mono text-sm" style={{ textAlign: 'right', color: 'var(--text-secondary)', minWidth: 110 }}>
-          {sess ? (
-            <>
-              <div>{fmtCost(sess.total_cost_usd)}</div>
-              <div className="text-muted" style={{ fontSize: 11 }}>{fmtTokens(sess.total_tokens)} tok</div>
-            </>
-          ) : (
-            <div className="text-muted" style={{ fontSize: 11 }}>no session</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="truncate" style={{ fontWeight: 600, fontSize: 14 }}>
+          {node.title}
+          {hasChildren && (
+            <span className="text-muted" style={{ fontWeight: 400, fontSize: 12, marginLeft: 8 }}>
+              {childCount} sub-mission{childCount !== 1 ? 's' : ''}
+            </span>
           )}
         </div>
-
-        <StatusBadge status={node.status} />
+        <div className="flex items-center gap-8" style={{ marginTop: 4, flexWrap: 'wrap' }}>
+          {node.mission_type && node.mission_type !== 'implement' && (
+            <span className="tag">{node.mission_type}</span>
+          )}
+          {node.auto_dispatch === 1 && (
+            <span style={{
+              fontSize: 10, fontWeight: 700, padding: '1px 7px',
+              background: 'rgba(34,197,94,0.1)', color: 'var(--success)', borderRadius: 'var(--radius-full)',
+            }}>AUTO</span>
+          )}
+          {blocked.length > 0 && (
+            <span
+              title={`Waiting on: ${blocked.map(id => titleById.get(id) || id.slice(0, 8)).join(', ')}`}
+              style={{
+                fontSize: 11, padding: '1px 8px', borderRadius: 'var(--radius-full)',
+                background: 'var(--info-soft)', color: 'var(--info)', fontWeight: 600,
+              }}
+            >
+              blocked on {blocked.length}
+            </span>
+          )}
+          {node.depends_on?.length > 0 && blocked.length === 0 && node.status === 'draft' && (
+            <span className="text-sm" style={{ fontSize: 11, color: 'var(--success)' }}>deps met</span>
+          )}
+          <span className="text-sm text-muted" style={{ fontSize: 11 }}>{timeAgo(node.updated_at)}</span>
+        </div>
       </div>
 
-      {hasChildren && !isCollapsed && children.map(child => (
-        <TreeRow
-          key={child.id}
-          node={child}
-          depth={depth + 1}
-          childMap={childMap}
-          collapsed={collapsed}
-          toggle={toggle}
-          navigate={navigate}
-          titleById={titleById}
-        />
-      ))}
-    </>
+      <div className="font-mono text-sm" title="Latest session only" style={{ textAlign: 'right', color: 'var(--text-secondary)', minWidth: 110 }}>
+        {sess ? (
+          <>
+            <div>{fmtCost(sess.total_cost_usd)}</div>
+            <div className="text-muted" style={{ fontSize: 11 }}>{fmtTokens(sess.total_tokens)} tok</div>
+          </>
+        ) : (
+          <div className="text-muted" style={{ fontSize: 11 }}>no session</div>
+        )}
+      </div>
+
+      <StatusBadge status={node.status} />
+    </div>
   );
 }
 
@@ -175,28 +157,40 @@ function SwarmTree({ id, navigate }) {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [collapsed, setCollapsed] = useState(() => new Set());
   const timerRef = useRef(null);
+  const mountedRef = useRef(true);
+  const inFlightRef = useRef(false);   // one request at a time
+  const rerunRef = useRef(false);      // a refresh was asked for while one was in flight
 
   const load = useCallback(async () => {
     try {
       const t = await getSwarmTree(id);
-      setTree(t);
-      setError(null);
-      setLastUpdated(Date.now());
+      if (mountedRef.current) {
+        setTree(t);
+        setError(null);
+        setLastUpdated(Date.now());
+      }
       return t;
     } catch (e) {
-      setError(e.message);
+      if (mountedRef.current) setError(e.message);
       return null;
     }
   }, [id]);
 
   // Poll while the swarm has any non-terminal mission; stop once everything is terminal.
-  // A single timer ref + mounted ref so manual refreshes and the poll loop never overlap
-  // and nothing is scheduled after unmount.
-  const mountedRef = useRef(true);
+  // One timer, one in-flight request: a manual refresh during a request is coalesced into
+  // a single follow-up instead of overlapping it.
   const refresh = useCallback(async () => {
+    if (inFlightRef.current) { rerunRef.current = true; return; }
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
-    const t = await load();
+    inFlightRef.current = true;
+    let t = null;
+    try {
+      t = await load();
+    } finally {
+      inFlightRef.current = false;
+    }
     if (!mountedRef.current) return;
+    if (rerunRef.current) { rerunRef.current = false; refresh(); return; }
     const active = t ? t.summary?.is_active : true; // keep retrying on error
     if (active) timerRef.current = setTimeout(refresh, POLL_MS);
   }, [load]);
@@ -218,7 +212,10 @@ function SwarmTree({ id, navigate }) {
     });
   };
 
-  const childMap = useMemo(() => buildChildMap(tree?.missions || []), [tree]);
+  const rootId = tree?.root?.id;
+  const built = useMemo(() => buildChildMap(rootId, tree?.missions || []), [rootId, tree]);
+  const childMap = built.map;
+  const flat = useMemo(() => flattenTree(rootId, childMap, collapsed), [rootId, childMap, collapsed]);
   const titleById = useMemo(() => {
     const m = new Map();
     (tree?.missions || []).forEach(x => m.set(x.id, x.title));
@@ -232,10 +229,6 @@ function SwarmTree({ id, navigate }) {
       <div className="empty-state">
         <h3>Could not load swarm</h3>
         <p>{error}</p>
-        <p className="text-sm text-muted">
-          If this is a fresh checkout, the swarm router may not be included in the API yet
-          (<code>app.include_router(routes_swarm_tree.router)</code>).
-        </p>
         <button className="btn btn-primary" onClick={refresh}>Retry</button>
       </div>
     </div>
@@ -248,7 +241,6 @@ function SwarmTree({ id, navigate }) {
   );
 
   const { root, summary } = tree;
-  const rootChildren = childMap.get(root.id) || [];
 
   return (
     <div>
@@ -271,9 +263,6 @@ function SwarmTree({ id, navigate }) {
               {summary.is_active ? `live · refreshes every ${POLL_MS / 1000}s` : 'finished · polling stopped'}
             </span>
             {lastUpdated && <span className="text-sm text-muted">updated {timeAgo(new Date(lastUpdated).toISOString())}</span>}
-            {tree.truncated && (
-              <span className="tag" style={{ color: 'var(--warning)' }}>tree truncated at depth {tree.max_depth}</span>
-            )}
           </div>
         </div>
         <div className="flex gap-8">
@@ -289,6 +278,20 @@ function SwarmTree({ id, navigate }) {
         }}>
           Last refresh failed: {error}. Showing the previous result.
         </div>
+      )}
+      {tree.cycle_detected && (
+        <Warning>
+          This root&apos;s <code>parent_mission_id</code> points back into its own tree. The cycle was cut; the tree below is what is reachable.
+        </Warning>
+      )}
+      {(tree.truncated || flat.truncated) && (
+        <Warning>Tree is deeper than {tree.truncated ? tree.max_depth : 'the display limit'} levels; deeper missions are not shown.</Warning>
+      )}
+      {(built.dropped > 0 || flat.cycle) && (
+        <Warning>
+          {built.dropped > 0 ? `${built.dropped} row${built.dropped === 1 ? ' was' : 's were'} ignored because ` : 'Some rows were ignored because '}
+          they pointed at themselves, duplicated another mission, or looped back into the tree. Each mission is shown once.
+        </Warning>
       )}
 
       {/* Summary strip */}
@@ -319,10 +322,10 @@ function SwarmTree({ id, navigate }) {
             {summary.counts.failed}
           </div>
         </div>
-        <div className="stats-card stats-card--accent">
-          <div className="stats-label">Cost</div>
+        <div className="stats-card stats-card--accent" title={COST_HINT}>
+          <div className="stats-label">Cost (latest sessions)</div>
           <div className="stats-value">{fmtCost(summary.total_cost_usd)}</div>
-          <div className="text-sm text-muted">{fmtTokens(summary.total_tokens)} tokens</div>
+          <div className="text-sm text-muted">{fmtTokens(summary.total_tokens)} tokens · excludes retries</div>
         </div>
       </div>
 
@@ -332,27 +335,27 @@ function SwarmTree({ id, navigate }) {
           <span>Mission tree</span>
           <div className="flex gap-8">
             <button className="btn btn-ghost btn-sm" onClick={() => setCollapsed(new Set())}>Expand all</button>
-            <button className="btn btn-ghost btn-sm"
-              onClick={() => setCollapsed(new Set((tree.missions || []).filter(m => childMap.has(m.id)).map(m => m.id)))}>
+            <button className="btn btn-ghost btn-sm" onClick={() => setCollapsed(new Set(parentIds(childMap).filter(p => p !== rootId)))}>
               Collapse all
             </button>
           </div>
         </div>
 
-        {rootChildren.length === 0 ? (
+        {flat.rows.length === 0 ? (
           <div className="empty-state">
             <h3>No missions in this swarm yet</h3>
             <p>Missions whose <code>parent_mission_id</code> points at this root will appear here.</p>
           </div>
         ) : (
           <div className="flex flex-col gap-8">
-            {rootChildren.map(child => (
+            {flat.rows.map(({ node, depth, hasChildren, childCount }) => (
               <TreeRow
-                key={child.id}
-                node={child}
-                depth={0}
-                childMap={childMap}
-                collapsed={collapsed}
+                key={node.id}
+                node={node}
+                depth={depth}
+                hasChildren={hasChildren}
+                childCount={childCount}
+                isCollapsed={collapsed.has(node.id)}
                 toggle={toggle}
                 navigate={navigate}
                 titleById={titleById}
@@ -370,39 +373,45 @@ function SwarmTree({ id, navigate }) {
 // ──────────────────────────────────────────────
 
 function SwarmList({ navigate }) {
-  const [swarms, setSwarms] = useState(null);
+  const [page, setPage] = useState(null);      // { items, total, limit, offset }
+  const [offset, setOffset] = useState(0);
   const [error, setError] = useState(null);
+  const inFlightRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
       try {
-        const s = await listSwarms();
-        if (!cancelled) { setSwarms(s); setError(null); }
+        const p = await listSwarms({ limit: LIST_PAGE_SIZE, offset });
+        if (!cancelled) { setPage(p); setError(null); }
       } catch (e) {
         if (!cancelled) setError(e.message);
+      } finally {
+        inFlightRef.current = false;
       }
     };
     poll();
     const id = setInterval(poll, POLL_MS * 2);
     return () => { cancelled = true; clearInterval(id); };
-  }, []);
+  }, [offset]);
 
-  if (error && !swarms) return (
+  if (error && !page) return (
     <div className="empty-state">
       <h3>Could not load swarms</h3>
       <p>{error}</p>
-      <p className="text-sm text-muted">
-        The swarm router may not be included in the API yet
-        (<code>app.include_router(routes_swarm_tree.router)</code>).
-      </p>
     </div>
   );
-  if (!swarms) return (
+  if (!page) return (
     <div style={{ display: 'flex', justifyContent: 'center', padding: 60 }}>
       <div className="loading-spinner" />
     </div>
   );
+
+  const swarms = page.items || [];
+  const hasPrev = offset > 0;
+  const hasNext = offset + swarms.length < page.total;
 
   return (
     <div>
@@ -414,6 +423,15 @@ function SwarmList({ navigate }) {
           </p>
         </div>
       </div>
+
+      {error && (
+        <div style={{
+          padding: '8px 14px', marginBottom: 16, fontSize: 13,
+          background: 'var(--danger-soft)', color: 'var(--danger)', borderRadius: 'var(--radius-md)',
+        }}>
+          Last refresh failed: {error}. Showing the previous result.
+        </div>
+      )}
 
       {swarms.length === 0 ? (
         <div className="empty-state">
@@ -441,6 +459,7 @@ function SwarmList({ navigate }) {
                     {s.summary.is_active
                       ? <span className="text-sm" style={{ color: 'var(--warning)' }}>● live</span>
                       : <span className="text-sm text-muted">finished</span>}
+                    {s.cycle_detected && <span className="tag" style={{ color: 'var(--warning)' }}>cycle cut</span>}
                   </div>
                 </div>
                 <div className="flex gap-12 font-mono text-sm" style={{ color: 'var(--text-secondary)' }}>
@@ -448,12 +467,24 @@ function SwarmList({ navigate }) {
                   <span title="blocked" style={{ color: s.summary.blocked ? 'var(--info)' : undefined }}>{s.summary.blocked} blk</span>
                   <span title="completed" style={{ color: 'var(--success)' }}>{c.completed} done</span>
                   <span title="failed" style={{ color: c.failed ? 'var(--danger)' : undefined }}>{c.failed} fail</span>
-                  <span title="total cost">{fmtCost(s.summary.total_cost_usd)}</span>
+                  <span title={COST_HINT}>{fmtCost(s.summary.total_cost_usd)} latest</span>
                 </div>
                 <span className="text-muted" style={{ fontSize: 12 }}>{s.summary.total} missions</span>
               </div>
             );
           })}
+        </div>
+      )}
+
+      {(hasPrev || hasNext) && (
+        <div className="flex items-center justify-between mt-16">
+          <span className="text-sm text-muted">
+            {offset + 1}–{offset + swarms.length} of {page.total}
+          </span>
+          <div className="flex gap-8">
+            <button className="btn btn-ghost btn-sm" disabled={!hasPrev} onClick={() => setOffset(Math.max(0, offset - LIST_PAGE_SIZE))}>Previous</button>
+            <button className="btn btn-ghost btn-sm" disabled={!hasNext} onClick={() => setOffset(offset + LIST_PAGE_SIZE)}>Next</button>
+          </div>
         </div>
       )}
     </div>
