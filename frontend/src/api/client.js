@@ -208,3 +208,10 @@ export const planProject = (prompt, projectPath) => request('/plan', {
 
 // ── Plugins ──
 export const getPlugins = () => request('/plugins');
+
+// ── Swarms (observability, read-only) ──
+export const listSwarms = (projectId) => {
+  const params = projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
+  return request(`/swarms${params}`);
+};
+export const getSwarmTree = (swarmId) => request(`/swarms/${swarmId}/tree`);
