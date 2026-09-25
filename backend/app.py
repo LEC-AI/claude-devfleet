@@ -19,7 +19,6 @@ from models import (ProjectCreate, ProjectUpdate, MissionCreate, MissionUpdate,
 import health_checker
 import mission_watcher
 import scheduler
-from routes_goals import router as goals_router
 from autoloop import start_auto_loop, stop_auto_loop, get_auto_loop_status
 from remote_control import (start_remote_control, stop_remote_control,
                             get_remote_status, list_remote_sessions, cleanup_all as cleanup_remote,
@@ -94,7 +93,6 @@ async def lifespan(app):
 
 
 app = FastAPI(title="Claude DevFleet API", lifespan=lifespan)
-app.include_router(goals_router, prefix="/api")
 
 app.add_middleware(
     CORSMiddleware,
