@@ -4,3 +4,5 @@ aiosqlite==0.20.0
 pydantic==2.10.3
 httpx==0.28.1
 claude-code-sdk>=0.0.25
+tzdata>=2024.1
+pytest>=8.0

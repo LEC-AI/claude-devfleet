@@ -45,7 +45,7 @@ docker logs devfleet-api -f
 docker top devfleet-api | grep claude
 ```
 
-There are no tests or linting configured in this project.
+No linting is configured. The only test suite is `pytest backend/tests` (night-window track); it uses a temp SQLite file via `DEVFLEET_DB` and never touches `data/devfleet.db`.
 
 ## Key Files
 - `backend/app.py` — FastAPI routes: projects, missions, dispatch, resume, remote-control, sessions, reports, dashboard, auto-loop, scheduling, system status, MCP configs, services, health checks, incidents
@@ -64,6 +64,8 @@ There are no tests or linting configured in this project.
 - `backend/models.py` — Pydantic models: DispatchOptions, MissionCreate/Update (with parent_mission_id, depends_on, auto_dispatch, schedule_cron), McpServerCreate
 - `backend/prompt_template.py` — Builds full prompt from mission + last report
 - `backend/worktree.py` — Git worktree isolation for agents
+- `backend/night_window.py` — Night-window dispatch gate: `is_within_window` (pure, wrap-past-midnight), `get_active_window`, `is_project_in_window` (the ONE function to gate dispatch on; True when no window, fails open)
+- `backend/routes_night_window.py` — `GET`/`PUT /projects/{pid}/window` (upsert, one window per project)
 
 ## MCP Servers (auto-attached to every agent)
 Two stdio MCP servers spawned as subprocesses per agent dispatch:
@@ -103,6 +105,7 @@ Tool naming in allowed_tools: `mcp__devfleet-context__get_mission_context`, `mcp
 - `mission_events` — id, mission_id, event_type, source_mission_id, data, created_at
 - `conversations` — session_id, messages_json, updated_at
 - `mcp_configs` — id, project_id, server_name, server_type, config_json, enabled
+- `night_windows` — id, project_id (unique), start_time HH:MM, end_time HH:MM (may wrap midnight), timezone (default Europe/London), enabled
 
 ## Development Rules
 - **NEVER restart containers while agents are running** — check `docker top devfleet-api` first
