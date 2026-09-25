@@ -1,1 +1,5 @@
+# Local development and tests only. Not installed in the Docker image.
+-r requirements.txt
 pytest>=8.0
+# Windows has no system timezone database; python:3.12-slim (Docker) already ships one.
+tzdata>=2024.1; sys_platform == "win32"
