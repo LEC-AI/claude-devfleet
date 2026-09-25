@@ -35,12 +35,26 @@ import uuid
 from datetime import datetime, timezone
 
 import db
+from paths import resolve_path
 
 log = logging.getLogger("devfleet.swarm_planner")
 
 SWARM_ROOT_TAG = "swarm_root"
 SWARM_MEMBER_TAG = "swarm"
 MAX_SWARM_TASKS = 20  # Safety limit, mirrors autoloop's max_iterations
+
+# Planner call: read-only tools so it can actually inspect the project, a turn
+# cap, and a wall-clock timeout so POST /swarms can't hang indefinitely.
+PLANNER_MODEL = "claude-sonnet-4-6"
+PLANNER_MAX_TURNS = int(os.environ.get("DEVFLEET_SWARM_PLANNER_MAX_TURNS", "15"))
+PLANNER_TIMEOUT_S = float(os.environ.get("DEVFLEET_SWARM_PLANNER_TIMEOUT", "300"))
+PLANNER_TOOLS = ["Read", "Glob", "Grep", "LS"]
+
+# Per-child cost limits. Without these, children get the DB default model
+# (Opus) with no turn or budget cap.
+CHILD_MODEL = os.environ.get("DEVFLEET_SWARM_CHILD_MODEL", "claude-sonnet-4-6")
+CHILD_MAX_TURNS = int(os.environ.get("DEVFLEET_SWARM_CHILD_MAX_TURNS", "80"))
+CHILD_MAX_BUDGET_USD = float(os.environ.get("DEVFLEET_SWARM_CHILD_MAX_BUDGET_USD", "5"))
 
 QUALITY_GATE = (
     "\n\n## Before you finish (required)\n"
@@ -65,7 +79,7 @@ SWARM_PROMPT = """You are a DevFleet swarm planner. Decompose a goal into a COMP
 {project_path}
 
 ## Instructions
-Inspect the project, then plan every task needed to achieve the goal. Tasks run in isolated git worktrees and merge into the main branch when done, so a task that depends on another's code must list it in depends_on_index.
+Inspect the project with the read-only tools (Read, Glob, Grep, LS), then plan every task needed to achieve the goal. Tasks run in isolated git worktrees and merge into the main branch when done, so a task that depends on another's code must list it in depends_on_index.
 
 Respond with ONLY a JSON array (no markdown, no code fences, no commentary):
 [
@@ -151,8 +165,16 @@ async def _collect_sdk_output(messages) -> str:
 async def _call_planner(prompt: str, cwd: str) -> str:
     """Call Claude via SDK if available, fall back to CLI subprocess.
 
-    Same pattern as autoloop._call_planner (deliberately not imported).
+    Same pattern as autoloop._call_planner (deliberately not imported), but
+    limited to read-only tools and bounded by PLANNER_TIMEOUT_S.
     """
+    try:
+        return await asyncio.wait_for(_run_planner(prompt, cwd), timeout=PLANNER_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        raise ValueError(f"Planner timed out after {PLANNER_TIMEOUT_S:.0f}s")
+
+
+async def _run_planner(prompt: str, cwd: str) -> str:
     try:
         from claude_code_sdk import query as sdk_query, ClaudeCodeOptions
     except ImportError:
@@ -160,9 +182,9 @@ async def _call_planner(prompt: str, cwd: str) -> str:
 
     if sdk_query is not None:
         options = ClaudeCodeOptions(
-            model="claude-sonnet-4-6",
-            permission_mode="bypassPermissions",
-            max_turns=1,
+            model=PLANNER_MODEL,
+            allowed_tools=PLANNER_TOOLS,
+            max_turns=PLANNER_MAX_TURNS,
             cwd=cwd,
         )
         return await _collect_sdk_output(sdk_query(prompt=prompt, options=options))
@@ -170,15 +192,20 @@ async def _call_planner(prompt: str, cwd: str) -> str:
     process = await asyncio.create_subprocess_exec(
         "claude",
         "--print",
-        "--dangerously-skip-permissions",
-        "--model", "claude-sonnet-4-6",
+        "--model", PLANNER_MODEL,
+        "--max-turns", str(PLANNER_MAX_TURNS),
+        "--allowedTools", *PLANNER_TOOLS,
         "-p", prompt,
         cwd=cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env={**os.environ},
     )
-    stdout, stderr = await process.communicate()
+    try:
+        stdout, stderr = await process.communicate()
+    except asyncio.CancelledError:
+        process.kill()
+        raise
     if process.returncode != 0:
         raise ValueError(
             f"Planner CLI exited {process.returncode}: "
@@ -187,19 +214,44 @@ async def _call_planner(prompt: str, cwd: str) -> str:
 
 
 def _extract_json(output: str):
-    """Pull a JSON array out of planner output, tolerating code fences or prose."""
-    text = output
-    if "```json" in text:
-        text = text.split("```json")[1].split("```")[0].strip()
-    elif "```" in text:
-        text = text.split("```")[1].split("```")[0].strip()
+    """Pull a JSON array out of planner output, tolerating code fences or prose.
+
+    Plain JSON is tried first: task prompts often contain ``` code blocks, so
+    splitting on the first fence would cut a valid plan in half.
+    """
+    text = output.strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        start, end = text.find("["), text.rfind("]")
-        if start == -1 or end <= start:
-            raise ValueError(f"Planner returned no JSON array: {output[:500]}")
+        pass
+
+    # Outer fence: from the first ``` line to the LAST ```, so fences inside
+    # task prompts stay intact.
+    fence = text.find("```")
+    close = text.rfind("```")
+    if fence != -1 and close > fence:
+        inner = text[fence + 3:close]
+        inner = inner.split("\n", 1)[1] if "\n" in inner else ""  # drop "json" language tag line
+        try:
+            return json.loads(inner.strip())
+        except json.JSONDecodeError:
+            pass
+
+    start, end = text.find("["), text.rfind("]")
+    if start == -1 or end <= start:
+        raise ValueError(f"Planner returned no JSON array: {output[:500]}")
+    try:
         return json.loads(text[start:end + 1])
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Planner returned invalid JSON ({e}): {output[:500]}")
+
+
+def _priority(value) -> int:
+    """Planner priority → int clamped to 0-5; missing/null/garbage → 2."""
+    try:
+        return max(0, min(5, int(value)))
+    except (TypeError, ValueError):
+        return 2
 
 
 def _validate_tasks(raw) -> list[dict]:
@@ -229,7 +281,7 @@ def _validate_tasks(raw) -> list[dict]:
             "title": str(t["title"]),
             "detailed_prompt": str(t["detailed_prompt"]),
             "acceptance_criteria": str(t.get("acceptance_criteria", "")),
-            "priority": int(t.get("priority", 2)),
+            "priority": _priority(t.get("priority")),
             "depends_on_index": sorted(set(deps)),
         })
 
@@ -286,7 +338,6 @@ async def launch_swarm(project_id: str, goal: str, max_agents: int) -> str:
     finally:
         await conn.close()
 
-    from app import resolve_path
     project_path = resolve_path(project["path"])
     if not os.path.isdir(project_path):
         raise LookupError(f"Project path not found: {project_path}")
@@ -319,11 +370,13 @@ async def launch_swarm(project_id: str, goal: str, max_agents: int) -> str:
             await conn.execute(
                 """INSERT INTO missions (id, project_id, title, detailed_prompt, acceptance_criteria,
                                          status, priority, tags, parent_mission_id, depends_on,
-                                         auto_dispatch, mission_number)
-                   VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, 1, ?)""",
+                                         auto_dispatch, mission_number, model, max_turns,
+                                         max_budget_usd)
+                   VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, 1, ?, ?, ?, ?)""",
                 (mid, project_id, task["title"], task["detailed_prompt"] + QUALITY_GATE,
                  task["acceptance_criteria"], task["priority"], json.dumps([SWARM_MEMBER_TAG]),
-                 root_id, json.dumps(depends_on), next_num + 1 + i),
+                 root_id, json.dumps(depends_on), next_num + 1 + i,
+                 CHILD_MODEL, CHILD_MAX_TURNS, CHILD_MAX_BUDGET_USD),
             )
 
         await conn.execute(

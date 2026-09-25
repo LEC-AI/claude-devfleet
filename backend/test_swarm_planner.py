@@ -100,6 +100,16 @@ def test_validation():
         raise AssertionError(f"expected ValueError for {why}")
 
     assert swarm_planner._extract_json('noise [{"a": 1}] trailing') == [{"a": 1}]
+
+    # Code blocks inside task prompts must not break parsing, raw or fenced
+    code_plan = [{"title": "a", "detailed_prompt": "Edit:\n```python\nx = 1\n```\ndone"}]
+    assert swarm_planner._extract_json(json.dumps(code_plan)) == code_plan
+    assert swarm_planner._extract_json("Plan:\n```json\n" + json.dumps(code_plan) + "\n```") == code_plan
+
+    # priority: null/garbage → default 2, out of range → clamped to 0-5
+    pr = v([{"title": str(i), "detailed_prompt": "x", "priority": p}
+            for i, p in enumerate([None, "high", 999, -3, "4"])])
+    assert [t["priority"] for t in pr] == [2, 2, 5, 0, 4], pr
     print("ok  validation")
 
 
@@ -113,6 +123,7 @@ async def test_sdk_message_sequence():
     import claude_code_sdk
 
     plan = json.dumps(JWT_PLAN)
+    seen_options = []
     sequences = {
         "assistant text + identical result": [
             AssistantMessage(content=[TextBlock(text=plan)], model="m"), _result(plan)],
@@ -124,6 +135,7 @@ async def test_sdk_message_sequence():
     try:
         for name, msgs in sequences.items():
             async def _query(prompt, options, _msgs=msgs):
+                seen_options.append(options)
                 for m in _msgs:
                     yield m
             claude_code_sdk.query = _query
@@ -139,9 +151,28 @@ async def test_sdk_message_sequence():
             assert "error_during_execution" in str(e), e
         else:
             raise AssertionError("expected ValueError on error ResultMessage")
+
+        # Planner can inspect the project read-only, over multiple turns
+        o = seen_options[0]
+        assert o.max_turns > 1 and set(o.allowed_tools) == {"Read", "Glob", "Grep", "LS"}, o
+        assert o.permission_mode != "bypassPermissions", o
+
+        async def _hang_query(prompt, options):
+            await asyncio.sleep(3600)
+            yield _result("never")
+        claude_code_sdk.query = _hang_query
+        swarm_planner.PLANNER_TIMEOUT_S, saved = 0.05, swarm_planner.PLANNER_TIMEOUT_S
+        try:
+            await _real_call_planner("p", _tmp)
+        except ValueError as e:
+            assert "timed out" in str(e), e
+        else:
+            raise AssertionError("expected ValueError on planner timeout")
+        finally:
+            swarm_planner.PLANNER_TIMEOUT_S = saved
     finally:
         claude_code_sdk.query = real_query
-    print("ok  SDK sequence: duplicated assistant+result parses once, error result raises")
+    print("ok  SDK sequence: duplicate parses once, error raises, read-only multi-turn, timeout")
 
 
 async def test_launch_and_watcher():
@@ -175,6 +206,9 @@ async def test_launch_and_watcher():
     assert set(json.loads(tests["depends_on"])) == {backend["id"], frontend["id"]}
     assert json.loads(backend["depends_on"]) == [] and json.loads(frontend["depends_on"]) == []
     assert all(swarm_planner.QUALITY_GATE in k["detailed_prompt"] for k in kids)
+    assert all((k["model"], k["max_turns"], k["max_budget_usd"]) ==
+               (swarm_planner.CHILD_MODEL, swarm_planner.CHILD_MAX_TURNS, swarm_planner.CHILD_MAX_BUDGET_USD)
+               for k in kids), kids
     print("ok  launch_swarm: 3 missions, tests depends_on backend+frontend, quality gate in every prompt")
 
     # One watcher poll: the two independent missions run, tests stays draft
@@ -258,6 +292,14 @@ def test_routes():
     swarm_planner._call_planner = _bad
     assert c.post("/api/projects/p1/swarms", json={"goal": "add JWT auth"}).status_code == 502
     print("ok  routes: POST/GET, 404s, 422, 502 on unusable plan")
+
+    # The generic dispatch/resume endpoints refuse to run a swarm root as an agent
+    import app as devfleet_app
+    c = TestClient(devfleet_app.app)
+    for action in ("dispatch", "resume"):
+        r = c.post(f"/api/missions/{sid}/{action}")
+        assert r.status_code == 400 and "Swarm root" in r.text, (action, r.text)
+    print("ok  swarm root cannot be dispatched or resumed")
 
 
 async def _main():
