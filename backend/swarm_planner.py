@@ -19,6 +19,12 @@ whose tags contain "swarm_root". Tracks 5 and 6 key off this tag.
 Quality gate: sdk_engine auto-merges on _validate_completion, which only
 checks that work happened, not that it's correct. The prompt below therefore
 requires every task to run the project's tests/lint/build before submitting.
+This is a prompt-level mitigation only, NOT an enforced test gate: an agent
+that ignores it can still be marked completed and merged.
+
+max_agents only shapes the plan (how much parallelism to aim for) and is
+recorded in the swarm_launched event. It is not a per-swarm concurrency
+limit; dispatch still follows mission_watcher's global MAX_CONCURRENT_AGENTS.
 """
 
 import asyncio
@@ -40,11 +46,15 @@ QUALITY_GATE = (
     "\n\n## Before you finish (required)\n"
     "Run the project's existing tests, lint and build commands (look for them in "
     "CLAUDE.md, README, package.json, pyproject.toml, Makefile, etc.). If any of them "
-    "fail, fix the problem and run them again. Do NOT call submit_report until they "
-    "pass. If the project has no tests for what you built, add them. If a failure is "
-    "genuinely outside this task's scope, say so explicitly in errors_encountered "
-    "and what_untested instead of reporting success."
+    "fail, fix the problem and run them again. Keep fixing until every check passes. "
+    "If the project has no tests for what you built, add them.\n"
+    "This task is NOT complete while any check fails, including failures you believe "
+    "are outside this task's scope. There is no exception. If you cannot make every "
+    "check pass, do not report success: start what_done with \"INCOMPLETE:\", list "
+    "each failing command and its error in errors_encountered, and do not claim the "
+    "acceptance criteria are met."
 )
+
 
 SWARM_PROMPT = """You are a DevFleet swarm planner. Decompose a goal into a COMPLETE set of coding tasks that parallel agents will execute, with explicit dependencies between them.
 
@@ -110,6 +120,34 @@ async def get_active_goal(project_id: str) -> dict | None:
     return _goal_stub.get(project_id)
 
 
+async def _collect_sdk_output(messages) -> str:
+    """Reduce an SDK message stream to the planner's answer.
+
+    The final ResultMessage.result is canonical. Assistant TextBlocks usually
+    repeat the same answer, so they are only a fallback when there is no
+    result — concatenating both would yield two JSON arrays back to back.
+    Raises ValueError on an error result.
+    """
+    from claude_code_sdk.types import AssistantMessage, ResultMessage, TextBlock
+
+    assistant_parts = []
+    result = None
+    async for message in messages:
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock):
+                    assistant_parts.append(block.text)
+        elif isinstance(message, ResultMessage):
+            if message.is_error:
+                raise ValueError(
+                    f"Planner call failed ({message.subtype}): {(message.result or '')[:500]}")
+            result = message.result
+
+    if result and result.strip():
+        return result.strip()
+    return "\n".join(assistant_parts).strip()
+
+
 async def _call_planner(prompt: str, cwd: str) -> str:
     """Call Claude via SDK if available, fall back to CLI subprocess.
 
@@ -117,42 +155,35 @@ async def _call_planner(prompt: str, cwd: str) -> str:
     """
     try:
         from claude_code_sdk import query as sdk_query, ClaudeCodeOptions
-        from claude_code_sdk.types import TextBlock
+    except ImportError:
+        sdk_query = None
 
+    if sdk_query is not None:
         options = ClaudeCodeOptions(
             model="claude-sonnet-4-6",
             permission_mode="bypassPermissions",
             max_turns=1,
             cwd=cwd,
         )
+        return await _collect_sdk_output(sdk_query(prompt=prompt, options=options))
 
-        output_parts = []
-        async for message in sdk_query(prompt=prompt, options=options):
-            if message is None:
-                continue
-            if hasattr(message, "content"):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        output_parts.append(block.text)
-            elif hasattr(message, "result") and message.result:
-                output_parts.append(message.result)
-
-        return "\n".join(output_parts).strip()
-
-    except ImportError:
-        process = await asyncio.create_subprocess_exec(
-            "claude",
-            "--print",
-            "--dangerously-skip-permissions",
-            "--model", "claude-sonnet-4-6",
-            "-p", prompt,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env={**os.environ},
-        )
-        stdout, _ = await process.communicate()
-        return stdout.decode("utf-8", errors="replace").strip()
+    process = await asyncio.create_subprocess_exec(
+        "claude",
+        "--print",
+        "--dangerously-skip-permissions",
+        "--model", "claude-sonnet-4-6",
+        "-p", prompt,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env={**os.environ},
+    )
+    stdout, stderr = await process.communicate()
+    if process.returncode != 0:
+        raise ValueError(
+            f"Planner CLI exited {process.returncode}: "
+            f"{stderr.decode('utf-8', errors='replace')[:500]}")
+    return stdout.decode("utf-8", errors="replace").strip()
 
 
 def _extract_json(output: str):
@@ -255,7 +286,12 @@ async def launch_swarm(project_id: str, goal: str, max_agents: int) -> str:
     finally:
         await conn.close()
 
-    tasks = await plan_swarm(goal, project["path"], max_agents)
+    from app import resolve_path
+    project_path = resolve_path(project["path"])
+    if not os.path.isdir(project_path):
+        raise LookupError(f"Project path not found: {project_path}")
+
+    tasks = await plan_swarm(goal, project_path, max_agents)
     goal_id = await _record_goal(project_id, goal)
 
     root_id = str(uuid.uuid4())

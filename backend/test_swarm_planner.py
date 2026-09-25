@@ -17,6 +17,10 @@ import types
 
 _tmp = tempfile.mkdtemp()
 os.environ["DEVFLEET_DB"] = os.path.join(_tmp, "test.db")
+# Host path /devfleet-host-swarmtest is "mounted" at _tmp, as in Docker.
+# Must be set before app is imported (it reads the maps at import time).
+_HOST_PATH = "/devfleet-host-swarmtest"
+os.environ["DEVFLEET_PATH_MAP_SWARMTEST"] = f"{_HOST_PATH}:{_tmp}"
 
 # Fake sdk_engine: mission_watcher imports dispatch_mission/running_tasks from it
 _fake_engine = types.ModuleType("sdk_engine")
@@ -35,6 +39,10 @@ sys.modules["sdk_engine"] = _fake_engine
 import db  # noqa: E402
 import mission_watcher  # noqa: E402
 import swarm_planner  # noqa: E402
+from claude_code_sdk.types import AssistantMessage, ResultMessage, TextBlock  # noqa: E402
+
+_real_call_planner = swarm_planner._call_planner
+_planner_cwds: list[str] = []
 
 JWT_PLAN = [
     {"title": "Backend JWT middleware", "detailed_prompt": "Add JWT middleware in backend/auth.py",
@@ -48,6 +56,7 @@ JWT_PLAN = [
 
 
 async def _fake_planner(prompt, cwd):
+    _planner_cwds.append(cwd)
     assert "add JWT auth" in prompt
     assert "tests/lint/build" in prompt, "planner prompt must carry the quality gate"
     return "Here is the plan:\n```json\n" + json.dumps(JWT_PLAN) + "\n```"
@@ -94,11 +103,54 @@ def test_validation():
     print("ok  validation")
 
 
+def _result(result, is_error=False, subtype="success"):
+    return ResultMessage(subtype=subtype, duration_ms=1, duration_api_ms=1, is_error=is_error,
+                         num_turns=1, session_id="s", result=result)
+
+
+async def test_sdk_message_sequence():
+    """Real SDK message types through the real _call_planner (only query is faked)."""
+    import claude_code_sdk
+
+    plan = json.dumps(JWT_PLAN)
+    sequences = {
+        "assistant text + identical result": [
+            AssistantMessage(content=[TextBlock(text=plan)], model="m"), _result(plan)],
+        "result only": [_result(plan)],
+        "assistant text, empty result": [
+            AssistantMessage(content=[TextBlock(text=plan)], model="m"), _result(None)],
+    }
+    real_query = claude_code_sdk.query
+    try:
+        for name, msgs in sequences.items():
+            async def _query(prompt, options, _msgs=msgs):
+                for m in _msgs:
+                    yield m
+            claude_code_sdk.query = _query
+            out = await _real_call_planner("p", _tmp)
+            assert len(swarm_planner._validate_tasks(swarm_planner._extract_json(out))) == 3, name
+
+        async def _error_query(prompt, options):
+            yield _result("rate limited", is_error=True, subtype="error_during_execution")
+        claude_code_sdk.query = _error_query
+        try:
+            await _real_call_planner("p", _tmp)
+        except ValueError as e:
+            assert "error_during_execution" in str(e), e
+        else:
+            raise AssertionError("expected ValueError on error ResultMessage")
+    finally:
+        claude_code_sdk.query = real_query
+    print("ok  SDK sequence: duplicated assistant+result parses once, error result raises")
+
+
 async def test_launch_and_watcher():
     await db.init_db()
     conn = await db.get_db()
     try:
         await conn.execute("INSERT INTO projects (id, name, path) VALUES ('p1', 'demo', ?)", (_tmp,))
+        await conn.execute("INSERT INTO projects (id, name, path) VALUES ('p2', 'mapped', ?)", (_HOST_PATH,))
+        await conn.execute("INSERT INTO projects (id, name, path) VALUES ('p3', 'gone', '/no/such/dir')")
         await conn.commit()
     finally:
         await conn.close()
@@ -154,6 +206,21 @@ async def test_launch_and_watcher():
     return root_id
 
 
+async def test_path_mapping():
+    swarm_planner._call_planner = _fake_planner
+    _planner_cwds.clear()
+    await swarm_planner.launch_swarm("p2", "add JWT auth on a mapped path", 3)
+    assert _planner_cwds == [_tmp], _planner_cwds  # host path translated to container path
+
+    try:
+        await swarm_planner.launch_swarm("p3", "add JWT auth", 3)
+    except LookupError:
+        pass
+    else:
+        raise AssertionError("expected LookupError for a missing project directory")
+    print("ok  path mapping: planner runs in the resolved container path; missing dir rejected")
+
+
 async def test_blocked_by_failure():
     swarm_planner._call_planner = _fake_planner
     root_id = await swarm_planner.launch_swarm("p1", "add JWT auth again", 3)
@@ -195,7 +262,9 @@ def test_routes():
 
 async def _main():
     test_validation()
+    await test_sdk_message_sequence()
     await test_launch_and_watcher()
+    await test_path_mapping()
     await test_blocked_by_failure()
 
 
