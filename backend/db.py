@@ -273,6 +273,21 @@ async def init_db():
             "ALTER TABLE projects ADD COLUMN parent_team TEXT DEFAULT ''",
             "ALTER TABLE projects ADD COLUMN teams_channel_id TEXT DEFAULT ''",
             "ALTER TABLE projects ADD COLUMN teams_channel_name TEXT DEFAULT ''",
+            # Track 3: durable goal registry (independent of the auto-loop runtime)
+            """CREATE TABLE IF NOT EXISTS goals_registry (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                goal_text TEXT NOT NULL CHECK (length(trim(goal_text)) > 0),
+                status TEXT NOT NULL DEFAULT 'active'
+                    CHECK (status IN ('active', 'paused', 'complete', 'stopped')),
+                max_iterations INTEGER NOT NULL DEFAULT 20 CHECK (max_iterations > 0),
+                current_iteration INTEGER NOT NULL DEFAULT 0 CHECK (current_iteration >= 0),
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                stopped_reason TEXT
+            )""",
+            """CREATE INDEX IF NOT EXISTS goals_registry_project_status_created
+                ON goals_registry(project_id, status, created_at DESC, id DESC)""",
         ]
         for migration in migrations:
             try:
