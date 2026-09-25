@@ -154,6 +154,21 @@ CREATE TABLE IF NOT EXISTS mcp_configs (
 CREATE INDEX IF NOT EXISTS idx_mcp_configs_project
     ON mcp_configs(project_id);
 
+-- Track 2: per-project dispatch time window (see night_window.py).
+-- One window per project; end_time may wrap past midnight (e.g. 23:00-07:00).
+CREATE TABLE IF NOT EXISTS night_windows (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    start_time TEXT NOT NULL,
+    end_time TEXT NOT NULL,
+    timezone TEXT DEFAULT 'Europe/London',
+    enabled INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_night_windows_project
+    ON night_windows(project_id);
 """
 
 # Track 4: Capacity Manager — day/night concurrency caps, global (project_id NULL) or per-project.
