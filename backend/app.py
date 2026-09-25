@@ -20,6 +20,12 @@ from models import (ProjectCreate, ProjectUpdate, MissionCreate, MissionUpdate,
 import health_checker
 import mission_watcher
 import scheduler
+from routes_goals import router as goals_router
+from routes_capacity import router as capacity_router
+from routes_night_window import router as night_window_router
+from routes_swarm import router as swarm_router
+from routes_swarm_tree import router as swarm_tree_router
+from nightly_summary import router as nightly_summary_router
 from autoloop import start_auto_loop, stop_auto_loop, get_auto_loop_status
 from remote_control import (start_remote_control, stop_remote_control,
                             get_remote_status, list_remote_sessions, cleanup_all as cleanup_remote,
@@ -76,6 +82,25 @@ app.add_middleware(
 )
 
 MAX_CONCURRENT_AGENTS = int(os.environ.get("DEVFLEET_MAX_AGENTS", "3"))
+
+# Feature routers from the swarm/scheduling tracks (goals, capacity,
+# night-window, swarm launch, swarm observability).
+app.include_router(goals_router)
+app.include_router(capacity_router)
+app.include_router(night_window_router)
+app.include_router(swarm_router)
+app.include_router(swarm_tree_router)
+app.include_router(nightly_summary_router)
+
+
+def _is_swarm_root(mission: dict) -> bool:
+    """Malformed tags JSON is treated as "not a swarm root" rather than a 500 —
+    a mission that was always dispatchable before this guard existed must stay
+    dispatchable if its tags happen to be bad data."""
+    try:
+        return "swarm_root" in json.loads(mission.get("tags") or "[]")
+    except (TypeError, ValueError):
+        return False
 
 
 # ──────────────────────────────────────────────
@@ -653,7 +678,7 @@ async def dispatch(mid: str, body: DispatchOptions | None = None):
         mission = dict(rows[0])
         if mission["status"] == "running":
             raise HTTPException(400, "Mission already running")
-        if "swarm_root" in json.loads(mission.get("tags") or "[]"):
+        if _is_swarm_root(mission):
             raise HTTPException(400, "Swarm roots are containers, not coding missions — dispatch their children")
 
         # Get last report for context
@@ -703,7 +728,7 @@ async def resume(mid: str, body: DispatchOptions | None = None):
         mission = dict(rows[0])
         if mission["status"] == "running":
             raise HTTPException(400, "Mission already running")
-        if "swarm_root" in json.loads(mission.get("tags") or "[]"):
+        if _is_swarm_root(mission):
             raise HTTPException(400, "Swarm roots are containers, not coding missions — dispatch their children")
 
         # Find the last session with a Claude session ID

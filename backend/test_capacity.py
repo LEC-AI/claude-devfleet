@@ -127,16 +127,14 @@ async def test_available_slots_respects_cli_engine():
 
 
 async def test_window_id_validated_when_night_windows_exists():
+    # night_windows is the real table from Track 2 (db.py's schema) by the time
+    # this runs — db.init_db() in main() already created it, project_id NOT NULL
+    # included, so no local CREATE TABLE stub is needed here anymore.
     conn = await db.get_db()
     try:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS night_windows (
-                id TEXT PRIMARY KEY, project_id TEXT, start_time TEXT, end_time TEXT,
-                timezone TEXT DEFAULT 'Europe/London', enabled INTEGER
-            )
-        """)
         await conn.execute(
-            "INSERT INTO night_windows (id, start_time, end_time) VALUES ('win-real', '23:00', '07:00')"
+            "INSERT INTO night_windows (id, project_id, start_time, end_time) "
+            "VALUES ('win-real', 'proj-1', '23:00', '07:00')"
         )
         await conn.commit()
     finally:
