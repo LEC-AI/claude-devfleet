@@ -27,6 +27,8 @@ Started in `app.py` lifespan:
 - **Scheduler** (`scheduler.py`) — Checks cron schedules every 60s, clones template missions with `auto_dispatch=1`
 - **Health Checker** (`health_checker.py`) — Polls monitored services for uptime
 
+Not yet a background service, despite having a full data + API layer: night-window dispatch gating, capacity-based concurrency limits, and automatic nightly summaries. Their modules and `/api` routes are live (see Key Files below), but nothing calls them from `mission_watcher.py`/`autoloop.py`/`scheduler.py` yet — that wiring is the next piece of work, not done in this pass.
+
 ## Build & Run Commands
 
 ```bash
@@ -45,7 +47,9 @@ docker logs devfleet-api -f
 docker top devfleet-api | grep claude
 ```
 
-No linting is configured. The only test suite is `pytest backend/tests` (night-window track): install with `pip install -r backend/requirements-dev.txt`. It uses a temp SQLite file via `DEVFLEET_DB` and never touches `data/devfleet.db`.
+No linting is configured. Tests:
+- `pytest backend/tests -q` (night-window + nightly-summary): install with `pip install -r backend/requirements-dev.txt`. Uses a temp SQLite file via `DEVFLEET_DB`, never touches `data/devfleet.db`.
+- Standalone, framework-free checks — run directly with `python3 <file>` from `backend/`: `test_goals.py`, `test_capacity.py`, `test_swarm_planner.py`, `test_swarm_tree.py`.
 
 ## Key Files
 - `backend/app.py` — FastAPI routes: projects, missions, dispatch, resume, remote-control, sessions, reports, dashboard, auto-loop, scheduling, system status, MCP configs, services, health checks, incidents
@@ -64,8 +68,17 @@ No linting is configured. The only test suite is `pytest backend/tests` (night-w
 - `backend/models.py` — Pydantic models: DispatchOptions, MissionCreate/Update (with parent_mission_id, depends_on, auto_dispatch, schedule_cron), McpServerCreate
 - `backend/prompt_template.py` — Builds full prompt from mission + last report
 - `backend/worktree.py` — Git worktree isolation for agents
-- `backend/night_window.py` — Night-window dispatch gate: `is_within_window` (pure, wrap-past-midnight), `get_active_window`, `is_project_in_window` (the ONE function to gate dispatch on; True when no window, fails open). Not wired in yet: integration adds it to `mission_watcher._watch_loop`/`_find_eligible_missions` and `autoloop.auto_loop`
+- `backend/night_window.py` — Night-window dispatch gate: `is_within_window` (pure, wrap-past-midnight), `get_active_window`, `is_project_in_window` (the ONE function to gate dispatch on; True when no window, fails open). API is live (see routes below), but **not yet called from `mission_watcher.py`/`autoloop.py`** — a configured window has no effect on real dispatch until that wiring lands
 - `backend/routes_night_window.py` — `GET`/`PUT /api/projects/{pid}/window` (upsert, one window per project; strict HH:MM, start != end, canonical timezone name)
+- `backend/capacity.py` — Day/night concurrency cap resolution: `get_limit(project_id)`, `available_slots(project_id)`. Reads `night_windows` via `night_window.is_within_window`. API is live, but **`available_slots()` is not yet called from `mission_watcher.py`/`autoloop.py`** — they still use their own duplicated `MAX_CONCURRENT_AGENTS - running` arithmetic
+- `backend/routes_capacity.py` — `GET`/`PUT /api/capacity` (global or per-project day/night limits)
+- `backend/goals.py` — Persistent goal registry (survives restarts): `create_goal`, `get_active_goal`, `list_goals`, `update_goal_status`, `increment_iteration`. Not yet read by `autoloop.py` (still tracks its goal in-memory in `_active_loops`) — only `swarm_planner.py` uses it so far
+- `backend/routes_goals.py` — `POST`/`GET /api/projects/{id}/goals`, `PATCH /api/goals/{id}` (pause/resume/stop)
+- `backend/swarm_planner.py` — Fan-out planner (Track 1): `plan_swarm` (one Claude call → dependency graph of tasks), `launch_swarm` (inserts a draft `swarm_root` mission + `auto_dispatch=1` children with `depends_on` resolved; dispatch itself is left to the unmodified `mission_watcher.py`), `get_swarm_status`. Every generated task prompt carries a run-tests/lint/build quality gate — see module docstring for why (`sdk_engine._validate_completion` only checks work happened, not that it's correct)
+- `backend/routes_swarm.py` — `POST /api/projects/{id}/swarms`, `GET /api/swarms/{id}`
+- `backend/routes_swarm_tree.py` — Read-only swarm observability: `GET /api/swarms` (paginated list), `GET /api/swarms/{id}/tree` (full descendant tree, depth-capped at 20, per-node cost/status rollup)
+- `backend/nightly_summary.py` — Per-window cost/outcome rollup over `agent_sessions`/`reports`/`missions`: `build_nightly_summary`, `maybe_run_nightly_summary` (idempotent — safe to call every scheduler tick). `GET /api/projects/{id}/nightly-runs`, `POST .../nightly-runs/run` (manual trigger). **Not yet called automatically** — no scheduler hook wired in yet
+- `backend/paths.py` — Host↔container path translation (`resolve_path`/`reverse_path`), extracted from `app.py` so `swarm_planner.py` can use it without a circular import
 
 ## MCP Servers (auto-attached to every agent)
 Two stdio MCP servers spawned as subprocesses per agent dispatch:
@@ -106,6 +119,9 @@ Tool naming in allowed_tools: `mcp__devfleet-context__get_mission_context`, `mcp
 - `conversations` — session_id, messages_json, updated_at
 - `mcp_configs` — id, project_id, server_name, server_type, config_json, enabled
 - `night_windows` — id, project_id (unique), start_time HH:MM, end_time HH:MM (may wrap midnight), timezone (default Europe/London), enabled
+- `capacity_config` — id, project_id (nullable = global default), day_limit, night_limit, window_id (references a `night_windows` row, nullable, no FK — different track owns that table)
+- `goals_registry` — id, project_id, goal_text, status (active/paused/complete/stopped), max_iterations, current_iteration, created_at, updated_at, stopped_reason
+- `nightly_runs` — id, project_id, window_start, window_end, missions_completed, missions_failed, total_cost_usd, total_tokens, summary_text, created_at
 
 ## Development Rules
 - **NEVER restart containers while agents are running** — check `docker top devfleet-api` first
