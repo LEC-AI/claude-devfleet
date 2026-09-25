@@ -24,6 +24,7 @@ import os
 import sqlite3
 import uuid
 from datetime import datetime, time, timezone
+from zoneinfo import ZoneInfo
 
 import db
 
@@ -51,11 +52,18 @@ except ImportError:
         (backend/night_window.py::is_within_window(window, now) -> bool).
 
         Pure function: does `window` (start_time/end_time as "HH:MM", possibly
-        wrapping past midnight, e.g. 23:00-07:00) contain `now`?
+        wrapping past midnight, e.g. 23:00-07:00, interpreted in `window["timezone"]`)
+        contain `now`? `now` is converted into the window's own timezone before
+        comparing — comparing raw UTC clock time against a local-time window would
+        be off by the zone's UTC offset (and wrong for half the year across a DST
+        transition like Europe/London).
         """
+        tz = ZoneInfo(window.get("timezone") or "UTC")
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        current = now.astimezone(tz).time()
         start = _parse_hhmm(window["start_time"])
         end = _parse_hhmm(window["end_time"])
-        current = now.time()
         if start <= end:
             return start <= current < end
         return current >= start or current < end
@@ -102,6 +110,19 @@ async def _fetch_window(window_id: str) -> dict | None:
         await conn.close()
 
 
+async def _window_exists(conn, window_id: str) -> bool | None:
+    """True/False if night_windows exists and window_id was/wasn't found in it;
+    None if night_windows doesn't exist yet (Track 2 not merged) — the caller
+    should skip validation rather than reject every window_id."""
+    try:
+        rows = await conn.execute_fetchall("SELECT 1 FROM night_windows WHERE id=?", (window_id,))
+        return bool(rows)
+    except sqlite3.OperationalError as e:
+        if "no such table" not in str(e):
+            raise
+        return None
+
+
 async def get_capacity_config(project_id: str | None) -> dict | None:
     """Return the raw config row (project-specific, else global), or None if neither exists."""
     if project_id == "":
@@ -141,6 +162,13 @@ async def set_capacity_config(
             if not rows:
                 raise ProjectNotFound(project_id)
 
+        if window_id is not None:
+            exists = await _window_exists(conn, window_id)
+            if exists is False:
+                raise InvalidCapacityConfig(f"window_id '{window_id}' does not reference an existing night window")
+            # exists is None: night_windows doesn't exist on this branch yet (Track 2
+            # not merged) — can't validate, so don't reject every window_id because of it.
+
         now = datetime.now(timezone.utc).isoformat()
         new_id = str(uuid.uuid4())
         await conn.execute(
@@ -170,6 +198,11 @@ async def get_limit(project_id: str | None) -> int:
     currently active, else day_limit. Falls back to DEFAULT_LIMIT
     (DEVFLEET_MAX_AGENTS, matching today's behavior) when no config row
     exists at all.
+
+    A capacity lookup sits on the dispatch path — a bad window row (malformed
+    time string, unknown IANA timezone) must not take dispatch down with it,
+    so is_within_window() failures are logged and treated as "not in the
+    window" (fail open to day_limit) rather than propagated.
     """
     config = await get_capacity_config(project_id)
     if config is None:
@@ -177,20 +210,43 @@ async def get_limit(project_id: str | None) -> int:
 
     if config.get("window_id"):
         window = await _fetch_window(config["window_id"])
-        if window and is_within_window(window, datetime.now(timezone.utc)):
-            return config["night_limit"]
+        if window:
+            try:
+                if is_within_window(window, datetime.now(timezone.utc)):
+                    return config["night_limit"]
+            except Exception:
+                log.warning(
+                    "is_within_window failed for window_id=%r — falling back to day_limit",
+                    config["window_id"], exc_info=True,
+                )
 
     return config["day_limit"]
 
 
+def _running_tasks_dict() -> dict:
+    """Mirrors app.py's dispatch-engine selection (DEVFLEET_ENGINE, default
+    "sdk", falling back to the CLI dispatcher if claude-code-sdk isn't
+    installed) — sdk_engine.running_tasks is the wrong dict to read under
+    DEVFLEET_ENGINE=cli, dispatcher.running_tasks is the wrong one under sdk.
+    """
+    use_sdk = os.environ.get("DEVFLEET_ENGINE", "sdk").lower() == "sdk"
+    if use_sdk:
+        try:
+            from sdk_engine import running_tasks
+            return running_tasks
+        except ImportError:
+            pass
+    from dispatcher import running_tasks
+    return running_tasks
+
+
 async def available_slots(project_id: str | None = None) -> int:
     """Drop-in replacement for the duplicated `limit - running` arithmetic in
-    autoloop.py / mission_watcher.py. Reads running_tasks from sdk_engine
-    exactly as those two files do today; wiring this in for them is an
-    integration step, not this track's job.
+    autoloop.py / mission_watcher.py; wiring this in for them is an
+    integration step, not this track's job. Clamped to >= 0 — a limit lowered
+    below the current running count is "no slots", not a negative number.
     """
-    from sdk_engine import running_tasks
-
+    running_tasks = _running_tasks_dict()
     limit = await get_limit(project_id)
     running = sum(1 for t in running_tasks.values() if not t.done())
-    return limit - running
+    return max(0, limit - running)

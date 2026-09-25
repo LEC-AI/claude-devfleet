@@ -49,6 +49,120 @@ async def test_is_within_window_no_wrap():
     assert capacity.is_within_window(window, datetime(2026, 1, 1, 18, 0)) is False
 
 
+async def test_is_within_window_timezone_conversion():
+    # Europe/London window: 23:00-07:00 local time. During BST (UTC+1), 22:30 UTC
+    # is 23:30 London time — inside the window. Comparing raw UTC clock time
+    # against the window (the pre-fix behavior) would wrongly say False here.
+    window = {"start_time": "23:00", "end_time": "07:00", "timezone": "Europe/London"}
+    bst_instant = datetime(2026, 7, 15, 22, 30, tzinfo=timezone.utc)
+    assert capacity.is_within_window(window, bst_instant) is True
+
+    # Same clock time in winter (GMT, UTC+0) — 22:30 UTC is 22:30 London, still
+    # before the 23:00 start either way. Confirms the fix isn't just always True.
+    gmt_instant = datetime(2026, 1, 15, 22, 30, tzinfo=timezone.utc)
+    assert capacity.is_within_window(window, gmt_instant) is False
+
+
+async def test_get_limit_fails_open_on_bad_window():
+    await capacity.set_capacity_config("proj-1", day_limit=2, night_limit=8, window_id="win-bad")
+
+    real_fetch_window = capacity._fetch_window
+    capacity._fetch_window = lambda window_id: _async_return({"start_time": "not-a-time", "end_time": "07:00"})
+    try:
+        limit = await capacity.get_limit("proj-1")
+        assert limit == 2, f"expected fail-open to day_limit=2, got {limit}"
+    finally:
+        capacity._fetch_window = real_fetch_window
+
+
+async def test_available_slots_clamped_to_zero():
+    await capacity.set_capacity_config("proj-2", day_limit=2, night_limit=8, window_id=None)
+
+    class FakeTask:
+        def done(self):
+            return False
+
+    sdk_engine.running_tasks.clear()
+    for i in range(10):
+        sdk_engine.running_tasks[f"session-{i}"] = FakeTask()
+
+    real_get_limit = capacity.get_limit
+    capacity.get_limit = lambda project_id: _async_return(2)
+    try:
+        slots = await capacity.available_slots("proj-2")
+        assert slots == 0, f"expected clamped 0 (not negative), got {slots}"
+    finally:
+        capacity.get_limit = real_get_limit
+        sdk_engine.running_tasks.clear()
+
+
+async def test_available_slots_respects_cli_engine():
+    # dispatcher.py has no claude-code-sdk dependency — import the real module
+    # rather than faking it, to prove the engine switch actually works.
+    import dispatcher
+
+    class FakeTask:
+        def done(self):
+            return False
+
+    dispatcher.running_tasks.clear()
+    sdk_engine.running_tasks.clear()
+    dispatcher.running_tasks["cli-session"] = FakeTask()
+
+    real_get_limit = capacity.get_limit
+    capacity.get_limit = lambda project_id: _async_return(8)
+    prev_engine = os.environ.get("DEVFLEET_ENGINE")
+    os.environ["DEVFLEET_ENGINE"] = "cli"
+    try:
+        slots = await capacity.available_slots("proj-2")
+        assert slots == 7, f"expected 8-1=7 counted from dispatcher.running_tasks, got {slots}"
+        assert len(sdk_engine.running_tasks) == 0, "sdk_engine.running_tasks must not be touched under DEVFLEET_ENGINE=cli"
+    finally:
+        capacity.get_limit = real_get_limit
+        dispatcher.running_tasks.clear()
+        if prev_engine is None:
+            os.environ.pop("DEVFLEET_ENGINE", None)
+        else:
+            os.environ["DEVFLEET_ENGINE"] = prev_engine
+
+
+async def test_window_id_validated_when_night_windows_exists():
+    conn = await db.get_db()
+    try:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS night_windows (
+                id TEXT PRIMARY KEY, project_id TEXT, start_time TEXT, end_time TEXT,
+                timezone TEXT DEFAULT 'Europe/London', enabled INTEGER
+            )
+        """)
+        await conn.execute(
+            "INSERT INTO night_windows (id, start_time, end_time) VALUES ('win-real', '23:00', '07:00')"
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+    try:
+        # Valid window_id — accepted.
+        await capacity.set_capacity_config("proj-1", day_limit=2, night_limit=8, window_id="win-real")
+
+        # Unknown window_id, but night_windows now exists and is checkable — rejected.
+        try:
+            await capacity.set_capacity_config("proj-1", day_limit=2, night_limit=8, window_id="no-such-window")
+            assert False, "expected InvalidCapacityConfig for an unknown window_id"
+        except capacity.InvalidCapacityConfig:
+            pass
+    finally:
+        conn = await db.get_db()
+        await conn.execute("DROP TABLE night_windows")
+        await conn.commit()
+        await conn.close()
+
+    # Table gone again (Track 2 not merged, as on this branch normally) — an
+    # unvalidatable window_id must not be rejected just because we can't check it.
+    await capacity.set_capacity_config("proj-1", day_limit=2, night_limit=8, window_id="unverifiable")
+
+
 async def test_concurrent_writes_converge_on_one_row():
     """Reproduces the review's finding: 8 concurrent first-writes to the same
     scope must produce exactly 1 row, not 8."""
@@ -191,13 +305,18 @@ async def main():
     await _seed_projects()
     await test_is_within_window_wrap()
     await test_is_within_window_no_wrap()
+    await test_is_within_window_timezone_conversion()
     await test_concurrent_writes_converge_on_one_row()
     await test_negative_limits_rejected()
     await test_empty_string_project_id_rejected()
     await test_nonexistent_project_id_rejected()
+    await test_window_id_validated_when_night_windows_exists()
     await test_get_limit_no_config_falls_back_to_env()
     await test_get_limit_day_vs_night()
+    await test_get_limit_fails_open_on_bad_window()
     await test_available_slots()
+    await test_available_slots_clamped_to_zero()
+    await test_available_slots_respects_cli_engine()
     os.unlink(_tmp_db.name)
     print("test_capacity.py: all assertions passed")
 
