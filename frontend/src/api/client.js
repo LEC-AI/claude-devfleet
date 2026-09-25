@@ -208,3 +208,14 @@ export const planProject = (prompt, projectPath) => request('/plan', {
 
 // ── Plugins ──
 export const getPlugins = () => request('/plugins');
+
+// ── Swarms (observability, read-only) ──
+export function listSwarms(filters = {}) {
+  const params = new URLSearchParams();
+  if (filters.project_id) params.set('project_id', filters.project_id);
+  if (filters.limit) params.set('limit', String(filters.limit));
+  if (filters.offset) params.set('offset', String(filters.offset));
+  const qs = params.toString();
+  return request(`/swarms${qs ? '?' + qs : ''}`);
+}
+export const getSwarmTree = (swarmId) => request(`/swarms/${swarmId}/tree`);

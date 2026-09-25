@@ -9,6 +9,7 @@ import Reports from './pages/Reports';
 import StatusPage from './pages/StatusPage';
 import ProjectDetail from './pages/ProjectDetail';
 import Integrations from './pages/Integrations';
+import SwarmView from './pages/SwarmView';
 
 function App() {
   const [page, setPage] = useState('dashboard');
@@ -33,6 +34,10 @@ function App() {
         return <MissionDetail id={selectedId} navigate={navigate} />;
       case 'live':
         return <LiveAgent sessionId={selectedId} navigate={navigate} />;
+      case 'swarms':
+        return <SwarmView id={null} navigate={navigate} />;
+      case 'swarm':
+        return <SwarmView id={selectedId} navigate={navigate} />;
       case 'reports':
         return <Reports navigate={navigate} />;
       case 'integrations':

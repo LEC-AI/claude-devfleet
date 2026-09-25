@@ -168,6 +168,8 @@ export default function MissionDetail({ id, navigate }) {
 
   const canEdit = mission.status !== 'running';
   const canDispatch = mission.status !== 'running';
+  let isSwarmRoot = false;
+  try { isSwarmRoot = JSON.parse(mission.tags || '[]').includes('swarm_root'); } catch {}
 
   return (
     <div>
@@ -202,6 +204,11 @@ export default function MissionDetail({ id, navigate }) {
           </div>
         </div>
         <div className="flex gap-8">
+          {isSwarmRoot && !editing && (
+            <button className="btn btn-ghost" onClick={() => navigate('swarm', mission.id)} title="Open the live swarm tree for this root">
+              View Swarm Tree
+            </button>
+          )}
           {canEdit && !editing && (
             <button className="btn btn-ghost" onClick={() => setEditing(true)}>Edit</button>
           )}
