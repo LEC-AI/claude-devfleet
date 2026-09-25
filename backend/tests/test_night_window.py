@@ -77,9 +77,11 @@ def test_same_day_window():
     assert is_within_window(day, london(23)) is False
 
 
-def test_start_equals_end_is_empty_window():
-    assert is_within_window({"start_time": "10:00", "end_time": "10:00"}, london(10)) is False
-    assert is_within_window({"start_time": "10:00", "end_time": "10:00"}, london(3)) is False
+@pytest.mark.parametrize("t", ["10:00", "00:00", "23:00"])
+def test_start_equals_end_is_invalid(t):
+    # Ambiguous (empty or 24 h?) so rejected; is_project_in_window fails open on it.
+    with pytest.raises(ValueError):
+        is_within_window({"start_time": t, "end_time": t}, london(10))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -158,10 +160,35 @@ def test_disabled_flag_makes_pure_function_false():
     assert is_within_window({**NIGHT, "enabled": 1}, london(2)) is True
 
 
-@pytest.mark.parametrize("bad", ["7", "07", "7:0:0", "25:00", "07:60", "", "seven", None, 7])
+@pytest.mark.parametrize("bad", [
+    "7", "07", "7:0:0", "25:00", "07:60", "", "seven", None, 7,
+    # From review: non-padded, signed, non-ASCII digits, whitespace
+    "7:5", "7:00", "07:5", "+7:00", "-1:00", "\u0660\u0667:\u0660\u0660", " 07:00", "07:00 ", "07:00\n",
+])
 def test_malformed_time_raises(bad):
     with pytest.raises(ValueError):
         is_within_window({"start_time": bad, "end_time": "07:00"}, london(2))
+
+
+def test_timezone_names_are_case_insensitive():
+    # 22:30 UTC in July is 23:30 BST -> inside, regardless of spelling
+    t = datetime(2026, 7, 15, 22, 30, tzinfo=timezone.utc)
+    for name in ("Europe/London", "europe/london", "EUROPE/LONDON"):
+        assert is_within_window({**NIGHT, "timezone": name}, t) is True
+
+
+@pytest.mark.parametrize("given,canonical", [
+    ("utc", "UTC"), ("UTC", "UTC"), ("europe/london", "Europe/London"),
+    ("asia/tokyo", "Asia/Tokyo"), (None, "Europe/London"),
+])
+def test_canonical_timezone(given, canonical):
+    assert nw.canonical_timezone(given) == canonical
+
+
+@pytest.mark.parametrize("bad", ["Mars/Base", "", "../etc/passwd", "Europe/../UTC", 5])
+def test_canonical_timezone_rejects_unknown(bad):
+    with pytest.raises(ValueError):
+        nw.canonical_timezone(bad)
 
 
 def test_unknown_timezone_raises():
@@ -285,6 +312,12 @@ def test_invalid_row_fails_open(fresh_db):
     assert asyncio.run(is_project_in_window("proj-no-window")) is True
 
 
+def test_start_equals_end_row_fails_open_not_blocks(fresh_db):
+    # Review issue 2: such a row must never block dispatch forever.
+    _insert_window("proj-night", start="23:00", end="23:00")
+    assert asyncio.run(is_project_in_window("proj-night")) is True
+
+
 def test_db_failure_fails_open(fresh_db, monkeypatch):
     async def boom():
         raise RuntimeError("db down")
@@ -310,17 +343,17 @@ def client(fresh_db):
 
 
 def test_get_window_unknown_project_404(client):
-    assert client.get("/projects/nope/window").status_code == 404
+    assert client.get("/api/projects/nope/window").status_code == 404
 
 
 def test_get_window_unconfigured(client):
-    r = client.get("/projects/proj-no-window/window")
+    r = client.get("/api/projects/proj-no-window/window")
     assert r.status_code == 200
     assert r.json() == {"configured": False, "project_id": "proj-no-window"}
 
 
 def test_put_then_get_window(client):
-    r = client.put("/projects/proj-night/window",
+    r = client.put("/api/projects/proj-night/window",
                    json={"start_time": "23:00", "end_time": "07:00"})
     assert r.status_code == 200, r.text
     body = r.json()
@@ -331,13 +364,13 @@ def test_put_then_get_window(client):
     assert body["timezone"] == "Europe/London"   # default applied
     assert body["enabled"] is True
 
-    g = client.get("/projects/proj-night/window").json()
+    g = client.get("/api/projects/proj-night/window").json()
     assert g["start_time"] == "23:00" and g["enabled"] is True
 
 
 def test_put_is_upsert_single_row(client):
-    client.put("/projects/proj-night/window", json={"start_time": "23:00", "end_time": "07:00"})
-    r = client.put("/projects/proj-night/window",
+    client.put("/api/projects/proj-night/window", json={"start_time": "23:00", "end_time": "07:00"})
+    r = client.put("/api/projects/proj-night/window",
                    json={"start_time": "22:00", "end_time": "06:00",
                          "timezone": "Europe/Paris", "enabled": False})
     assert r.status_code == 200
@@ -358,14 +391,14 @@ def test_put_is_upsert_single_row(client):
 
 
 def test_put_disabled_window_unrestricts_dispatch(client):
-    client.put("/projects/proj-night/window",
+    client.put("/api/projects/proj-night/window",
                json={"start_time": "23:00", "end_time": "07:00", "enabled": False})
     assert asyncio.run(get_active_window("proj-night")) is None
     assert asyncio.run(is_project_in_window("proj-night")) is True
 
 
 def test_put_unknown_project_404(client):
-    r = client.put("/projects/nope/window", json={"start_time": "23:00", "end_time": "07:00"})
+    r = client.put("/api/projects/nope/window", json={"start_time": "23:00", "end_time": "07:00"})
     assert r.status_code == 404
 
 
@@ -374,7 +407,34 @@ def test_put_unknown_project_404(client):
     {"start_time": "23:00", "end_time": "7"},
     {"start_time": "23:00", "end_time": "07:00", "timezone": "Mars/Base"},
     {"end_time": "07:00"},
+    # From review
+    {"start_time": "23:00", "end_time": "23:00"},
+    {"start_time": "00:00", "end_time": "00:00"},
+    {"start_time": "7:5", "end_time": "23:00"},
+    {"start_time": "+7:00", "end_time": "23:00"},
+    {"start_time": "\u0660\u0667:\u0660\u0660", "end_time": "23:00"},
 ])
 def test_put_rejects_invalid_payload(client, payload):
-    r = client.put("/projects/proj-night/window", json=payload)
+    r = client.put("/api/projects/proj-night/window", json=payload)
     assert r.status_code == 422, r.text
+
+
+def test_routes_are_under_api_prefix(client):
+    # Review issue 1: nginx and the Vite proxy only forward /api/.
+    assert client.get("/api/projects/proj-no-window/window").status_code == 200
+    assert client.get("/projects/proj-no-window/window").status_code == 404
+
+
+def test_put_stores_canonical_timezone(client):
+    r = client.put("/api/projects/proj-night/window",
+                   json={"start_time": "23:00", "end_time": "07:00", "timezone": "utc"})
+    assert r.status_code == 200, r.text
+    assert r.json()["timezone"] == "UTC"
+    assert client.get("/api/projects/proj-night/window").json()["timezone"] == "UTC"
+
+
+def test_put_explicit_null_timezone_defaults_to_london(client):
+    r = client.put("/api/projects/proj-night/window",
+                   json={"start_time": "23:00", "end_time": "07:00", "timezone": None})
+    assert r.status_code == 200, r.text
+    assert r.json()["timezone"] == "Europe/London"

@@ -45,7 +45,7 @@ docker logs devfleet-api -f
 docker top devfleet-api | grep claude
 ```
 
-No linting is configured. The only test suite is `pytest backend/tests` (night-window track); it uses a temp SQLite file via `DEVFLEET_DB` and never touches `data/devfleet.db`.
+No linting is configured. The only test suite is `pytest backend/tests` (night-window track): install with `pip install -r backend/requirements-dev.txt`. It uses a temp SQLite file via `DEVFLEET_DB` and never touches `data/devfleet.db`.
 
 ## Key Files
 - `backend/app.py` — FastAPI routes: projects, missions, dispatch, resume, remote-control, sessions, reports, dashboard, auto-loop, scheduling, system status, MCP configs, services, health checks, incidents
@@ -64,8 +64,8 @@ No linting is configured. The only test suite is `pytest backend/tests` (night-w
 - `backend/models.py` — Pydantic models: DispatchOptions, MissionCreate/Update (with parent_mission_id, depends_on, auto_dispatch, schedule_cron), McpServerCreate
 - `backend/prompt_template.py` — Builds full prompt from mission + last report
 - `backend/worktree.py` — Git worktree isolation for agents
-- `backend/night_window.py` — Night-window dispatch gate: `is_within_window` (pure, wrap-past-midnight), `get_active_window`, `is_project_in_window` (the ONE function to gate dispatch on; True when no window, fails open)
-- `backend/routes_night_window.py` — `GET`/`PUT /projects/{pid}/window` (upsert, one window per project)
+- `backend/night_window.py` — Night-window dispatch gate: `is_within_window` (pure, wrap-past-midnight), `get_active_window`, `is_project_in_window` (the ONE function to gate dispatch on; True when no window, fails open). Not wired in yet: integration adds it to `mission_watcher._watch_loop`/`_find_eligible_missions` and `autoloop.auto_loop`
+- `backend/routes_night_window.py` — `GET`/`PUT /api/projects/{pid}/window` (upsert, one window per project; strict HH:MM, start != end, canonical timezone name)
 
 ## MCP Servers (auto-attached to every agent)
 Two stdio MCP servers spawned as subprocesses per agent dispatch:

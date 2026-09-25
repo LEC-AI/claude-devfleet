@@ -78,7 +78,7 @@ app.add_middleware(
 
 MAX_CONCURRENT_AGENTS = int(os.environ.get("DEVFLEET_MAX_AGENTS", "3"))
 
-# Track 2: night-window endpoints (GET/PUT /projects/{pid}/window)
+# Track 2: night-window endpoints (GET/PUT /api/projects/{pid}/window)
 app.include_router(night_window_router)
 
 

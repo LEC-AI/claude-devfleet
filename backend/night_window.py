@@ -23,7 +23,13 @@ Semantics
 
 Boundary rule: start-inclusive, end-exclusive. For 23:00–07:00, 23:00 is
 inside, 06:59 is inside, 07:00 is outside. A window whose start equals its
-end is empty (always False).
+end is ambiguous (empty or 24 h?) and is rejected as invalid: the API returns
+422, and a stored row like that fails open.
+
+Format rule: times must be exactly HH:MM with ASCII digits ("07:05", not
+"7:5", "+7:00" or non-ASCII digits). Timezone names are matched
+case-insensitively and stored in canonical form ("utc" -> "UTC"), so
+behaviour is identical on Windows, macOS and Linux.
 
 Timezone rule: `now` is converted to the window's timezone before
 comparison. A naive `now` is treated as UTC, matching the rest of the
@@ -31,8 +37,10 @@ codebase which uses datetime.now(timezone.utc).
 """
 
 import logging
+import re
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
+from functools import lru_cache
+from zoneinfo import ZoneInfo, available_timezones
 
 import db
 
@@ -40,18 +48,35 @@ logger = logging.getLogger("devfleet.night_window")
 
 DEFAULT_TIMEZONE = "Europe/London"
 
+# [0-9], not \d: \d also matches non-ASCII digits such as "٠٧".
+_HHMM = re.compile(r"[0-9]{2}:[0-9]{2}")
+
 
 def _parse_hhmm(value: str) -> int:
-    """Parse 'HH:MM' into minutes since midnight. Raises ValueError if malformed."""
-    if not isinstance(value, str):
-        raise ValueError(f"time must be a string, got {type(value).__name__}")
-    parts = value.strip().split(":")
-    if len(parts) != 2:
-        raise ValueError(f"time must be HH:MM, got {value!r}")
-    hours, minutes = int(parts[0]), int(parts[1])
-    if not (0 <= hours <= 23 and 0 <= minutes <= 59):
+    """Parse strict 'HH:MM' into minutes since midnight. Raises ValueError if malformed."""
+    if not isinstance(value, str) or not _HHMM.fullmatch(value):
+        raise ValueError(f"time must be HH:MM (e.g. 07:05), got {value!r}")
+    hours, minutes = int(value[:2]), int(value[3:])
+    if hours > 23 or minutes > 59:
         raise ValueError(f"time out of range: {value!r}")
     return hours * 60 + minutes
+
+
+@lru_cache(maxsize=1)
+def _timezones_by_lower() -> dict[str, str]:
+    return {name.lower(): name for name in available_timezones()}
+
+
+def canonical_timezone(name: str | None) -> str:
+    """Return the canonical IANA spelling ("utc" -> "UTC"). Raises ValueError if unknown."""
+    if name is None:
+        return DEFAULT_TIMEZONE
+    if not isinstance(name, str):
+        raise ValueError(f"timezone must be a string, got {type(name).__name__}")
+    canonical = _timezones_by_lower().get(name.lower())
+    if canonical is None:
+        raise ValueError(f"unknown timezone: {name!r}")
+    return canonical
 
 
 def is_within_window(window: dict, now: datetime) -> bool:
@@ -63,28 +88,24 @@ def is_within_window(window: dict, now: datetime) -> bool:
     now:    aware or naive datetime. Naive is treated as UTC.
 
     Handles wrap-past-midnight (e.g. 23:00–07:00). Raises ValueError on a
-    malformed time string or unknown timezone — callers that must fail open
-    (is_project_in_window) catch this; tests can assert on it.
+    malformed time string, start == end, or unknown timezone — callers that
+    must fail open (is_project_in_window) catch this; tests can assert on it.
     """
     if "enabled" in window and not window["enabled"]:
         return False
 
     start = _parse_hhmm(window["start_time"])
     end = _parse_hhmm(window["end_time"])
+    if start == end:
+        raise ValueError(f"start_time and end_time must differ, both are {window['start_time']!r}")
 
-    tz_name = window.get("timezone") or DEFAULT_TIMEZONE
-    try:
-        tz = ZoneInfo(tz_name)
-    except Exception as exc:  # ZoneInfoNotFoundError, or bad key type
-        raise ValueError(f"unknown timezone: {tz_name!r}") from exc
+    tz = ZoneInfo(canonical_timezone(window.get("timezone") or DEFAULT_TIMEZONE))
 
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     local = now.astimezone(tz)
     current = local.hour * 60 + local.minute
 
-    if start == end:
-        return False  # empty window
     if start < end:
         return start <= current < end  # same-day range, e.g. 09:00–17:00
     return current >= start or current < end  # wraps midnight, e.g. 23:00–07:00

@@ -1,27 +1,27 @@
 """
 Night-window API — Track 2.
 
-    GET /projects/{pid}/window   -> current window or {"configured": false}
-    PUT /projects/{pid}/window   -> create or replace the project's window
+    GET /api/projects/{pid}/window   -> current window or {"configured": false}
+    PUT /api/projects/{pid}/window   -> create or replace the project's window
 
-Paths follow the task brief literally (no /api prefix). One window per
-project; PUT is an upsert keyed on project_id.
+Mounted under /api like every other route, because nginx and the Vite dev
+proxy only forward /api/. One window per project; PUT is an upsert keyed on
+project_id. Stored values are normalised: strict HH:MM, canonical timezone.
 """
 
 import logging
 import uuid
 from typing import Optional
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 import db
-from night_window import DEFAULT_TIMEZONE, _parse_hhmm
+from night_window import DEFAULT_TIMEZONE, _parse_hhmm, canonical_timezone
 
 logger = logging.getLogger("devfleet.night_window.routes")
 
-router = APIRouter(tags=["night-window"])
+router = APIRouter(prefix="/api", tags=["night-window"])
 
 
 class NightWindowUpsert(BaseModel):
@@ -33,21 +33,19 @@ class NightWindowUpsert(BaseModel):
     @field_validator("start_time", "end_time")
     @classmethod
     def _valid_hhmm(cls, v: str) -> str:
-        try:
-            _parse_hhmm(v)
-        except ValueError as exc:
-            raise ValueError(str(exc)) from exc
-        return v.strip()
+        _parse_hhmm(v)  # strict HH:MM, ASCII digits; raises ValueError -> 422
+        return v
 
     @field_validator("timezone")
     @classmethod
     def _valid_tz(cls, v: Optional[str]) -> str:
-        name = (v or DEFAULT_TIMEZONE).strip()
-        try:
-            ZoneInfo(name)
-        except Exception as exc:
-            raise ValueError(f"unknown timezone: {name!r}") from exc
-        return name
+        return canonical_timezone(v or DEFAULT_TIMEZONE)  # "utc" -> "UTC"; unknown -> 422
+
+    @model_validator(mode="after")
+    def _start_differs_from_end(self):
+        if self.start_time == self.end_time:
+            raise ValueError("start_time and end_time must differ (a window cannot be empty or 24 h)")
+        return self
 
 
 def _row_to_response(row) -> dict:
