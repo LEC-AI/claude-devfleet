@@ -1,5 +1,9 @@
+import logging
+
 import aiosqlite
 import os
+
+log = logging.getLogger("devfleet.db")
 
 DB_PATH = os.environ.get("DEVFLEET_DB", os.path.join(os.path.dirname(__file__), "..", "data", "devfleet.db"))
 
@@ -149,7 +153,76 @@ CREATE TABLE IF NOT EXISTS mcp_configs (
 
 CREATE INDEX IF NOT EXISTS idx_mcp_configs_project
     ON mcp_configs(project_id);
+
 """
+
+# Track 4: Capacity Manager — day/night concurrency caps, global (project_id NULL) or per-project.
+# window_id references a Track 2 night_windows row (nullable; no FK, that table is owned by another track).
+# scope_key exists only to give SQLite something non-null to put a UNIQUE constraint on:
+# a plain UNIQUE(project_id) would let multiple NULL (global) rows through, since SQLite
+# treats NULLs as distinct from each other. It's never read/written directly by application code.
+# Kept as its own script (not folded into SCHEMA above) so init_db() can also run it
+# standalone when rebuilding an out-of-date capacity_config table — see
+# _rebuild_capacity_config_if_stale below.
+CAPACITY_CONFIG_SCHEMA = """
+CREATE TABLE IF NOT EXISTS capacity_config (
+    id TEXT PRIMARY KEY,
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    scope_key TEXT GENERATED ALWAYS AS (COALESCE(project_id, '__global__')) STORED,
+    day_limit INTEGER NOT NULL CHECK (day_limit >= 0),
+    night_limit INTEGER NOT NULL CHECK (night_limit >= 0),
+    window_id TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_capacity_config_scope_unique
+    ON capacity_config(scope_key);
+"""
+
+SCHEMA += CAPACITY_CONFIG_SCHEMA
+
+
+async def _rebuild_capacity_config_if_stale(conn):
+    """The first version of capacity_config (before the scope_key uniqueness fix)
+    has no scope_key column. `CREATE TABLE IF NOT EXISTS` in SCHEMA is a no-op
+    against a table that already exists, so on a DB carrying that old shape,
+    creating the scope_key UNIQUE index right after would fail with
+    "no such column: scope_key" and take the whole app down on startup. SQLite
+    can't ALTER TABLE ADD a STORED generated column onto an existing table, so
+    detect the old shape here and rebuild the table instead, before SCHEMA runs.
+
+    No-ops on a fresh DB (capacity_config doesn't exist — PRAGMA table_info
+    returns no rows either way) or one already on the current schema.
+    """
+    cols = await conn.execute_fetchall("PRAGMA table_info(capacity_config)")
+    col_names = {row[1] for row in cols}
+    if not col_names or "scope_key" in col_names:
+        return
+
+    log.warning("capacity_config predates scope_key — rebuilding table in place")
+    await conn.execute("ALTER TABLE capacity_config RENAME TO capacity_config_old")
+    await conn.executescript(CAPACITY_CONFIG_SCHEMA)
+    # Keep the most-recently-updated row per scope — any duplicate rows left over
+    # from before the concurrency fix are dropped here rather than violating the
+    # new UNIQUE(scope_key) constraint mid-copy. Limits are clamped to >= 0 in case
+    # any pre-validation row has a negative value that would violate the new CHECK.
+    await conn.execute("""
+        INSERT INTO capacity_config (id, project_id, day_limit, night_limit, window_id, created_at, updated_at)
+        SELECT id, project_id, MAX(day_limit, 0), MAX(night_limit, 0), window_id, created_at, updated_at
+        FROM capacity_config_old
+        WHERE id IN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY COALESCE(project_id, '__global__')
+                    ORDER BY updated_at DESC, id DESC
+                ) AS rn
+                FROM capacity_config_old
+            )
+            WHERE rn = 1
+        )
+    """)
+    await conn.execute("DROP TABLE capacity_config_old")
 
 
 async def init_db():
@@ -157,6 +230,9 @@ async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA foreign_keys=ON")
+
+        await _rebuild_capacity_config_if_stale(db)
+
         await db.executescript(SCHEMA)
         # Migrations for existing DBs
         migrations = [
