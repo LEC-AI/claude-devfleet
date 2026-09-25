@@ -152,18 +152,22 @@ CREATE INDEX IF NOT EXISTS idx_mcp_configs_project
 
 -- Track 4: Capacity Manager — day/night concurrency caps, global (project_id NULL) or per-project.
 -- window_id references a Track 2 night_windows row (nullable; no FK, that table is owned by another track).
+-- scope_key exists only to give SQLite something non-null to put a UNIQUE constraint on:
+-- a plain UNIQUE(project_id) would let multiple NULL (global) rows through, since SQLite
+-- treats NULLs as distinct from each other. It's never read/written directly by application code.
 CREATE TABLE IF NOT EXISTS capacity_config (
     id TEXT PRIMARY KEY,
     project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
-    day_limit INTEGER NOT NULL,
-    night_limit INTEGER NOT NULL,
+    scope_key TEXT GENERATED ALWAYS AS (COALESCE(project_id, '__global__')) STORED,
+    day_limit INTEGER NOT NULL CHECK (day_limit >= 0),
+    night_limit INTEGER NOT NULL CHECK (night_limit >= 0),
     window_id TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_capacity_config_project
-    ON capacity_config(project_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_capacity_config_scope_unique
+    ON capacity_config(scope_key);
 """
 
 
@@ -172,6 +176,23 @@ async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA foreign_keys=ON")
+
+        # Dedup capacity_config before SCHEMA below adds a uniqueness constraint on it —
+        # an earlier version of this table's writer had a select-then-insert race that
+        # could leave more than one row per scope; without this, the constraint creation
+        # itself would fail on any DB that hit that race. No-ops (raises, caught) on a
+        # fresh DB where the table doesn't exist yet.
+        try:
+            await db.execute("""
+                DELETE FROM capacity_config
+                WHERE id NOT IN (
+                    SELECT MIN(id) FROM capacity_config
+                    GROUP BY COALESCE(project_id, '__global__')
+                )
+            """)
+        except Exception:
+            pass
+
         await db.executescript(SCHEMA)
         # Migrations for existing DBs
         migrations = [

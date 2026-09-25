@@ -49,6 +49,73 @@ async def test_is_within_window_no_wrap():
     assert capacity.is_within_window(window, datetime(2026, 1, 1, 18, 0)) is False
 
 
+async def test_concurrent_writes_converge_on_one_row():
+    """Reproduces the review's finding: 8 concurrent first-writes to the same
+    scope must produce exactly 1 row, not 8."""
+    conn = await db.get_db()
+    try:
+        await conn.execute("DELETE FROM capacity_config WHERE project_id IS NULL")
+        await conn.commit()
+    finally:
+        await conn.close()
+
+    await asyncio.gather(
+        *[capacity.set_capacity_config(None, day_limit=2, night_limit=8) for _ in range(8)]
+    )
+
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT * FROM capacity_config WHERE project_id IS NULL"
+        )
+    finally:
+        await conn.close()
+    assert len(rows) == 1, f"expected 1 global row, got {len(rows)}"
+
+    # Same scope, called again — must update the existing row, not add a second one.
+    await capacity.set_capacity_config(None, day_limit=3, night_limit=9)
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            "SELECT * FROM capacity_config WHERE project_id IS NULL"
+        )
+    finally:
+        await conn.close()
+    assert len(rows) == 1, f"expected still 1 global row after update, got {len(rows)}"
+    assert rows[0]["day_limit"] == 3
+
+
+async def test_negative_limits_rejected():
+    for kwargs in ({"day_limit": -2, "night_limit": 8}, {"day_limit": 2, "night_limit": -8}):
+        try:
+            await capacity.set_capacity_config("proj-1", **kwargs)
+            assert False, f"expected InvalidCapacityConfig for {kwargs}"
+        except capacity.InvalidCapacityConfig:
+            pass
+
+
+async def test_empty_string_project_id_rejected():
+    try:
+        await capacity.set_capacity_config("", day_limit=2, night_limit=8)
+        assert False, "expected InvalidCapacityConfig for project_id=''"
+    except capacity.InvalidCapacityConfig:
+        pass
+
+    try:
+        await capacity.get_capacity_config("")
+        assert False, "expected InvalidCapacityConfig for project_id=''"
+    except capacity.InvalidCapacityConfig:
+        pass
+
+
+async def test_nonexistent_project_id_rejected():
+    try:
+        await capacity.set_capacity_config("no-such-project-id", day_limit=2, night_limit=8)
+        assert False, "expected ProjectNotFound for a project_id with no matching row"
+    except capacity.ProjectNotFound:
+        pass
+
+
 async def test_get_limit_no_config_falls_back_to_env():
     limit = await capacity.get_limit("no-such-project")
     assert limit == int(os.environ.get("DEVFLEET_MAX_AGENTS", "3")), limit
@@ -124,6 +191,10 @@ async def main():
     await _seed_projects()
     await test_is_within_window_wrap()
     await test_is_within_window_no_wrap()
+    await test_concurrent_writes_converge_on_one_row()
+    await test_negative_limits_rejected()
+    await test_empty_string_project_id_rejected()
+    await test_nonexistent_project_id_rejected()
     await test_get_limit_no_config_falls_back_to_env()
     await test_get_limit_day_vs_night()
     await test_available_slots()
