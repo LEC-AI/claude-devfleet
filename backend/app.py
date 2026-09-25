@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 import db
+from paths import resolve_path, reverse_path
 from models import (ProjectCreate, ProjectUpdate, MissionCreate, MissionUpdate,
                     DispatchOptions, TOOL_PRESETS, MODEL_CHOICES,
                     ServiceCreate, ServiceUpdate, IncidentCreate, IncidentUpdate,
@@ -44,33 +45,6 @@ else:
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 log = logging.getLogger("devfleet")
-
-# Path mapping: host paths ↔ container paths
-# e.g. /home/user/my-project → /workspace/my-project (inside Docker)
-_PATH_MAPS = []
-for env_key, env_val in os.environ.items():
-    if env_key.startswith("DEVFLEET_PATH_MAP_"):
-        # Format: HOST_PATH:CONTAINER_PATH
-        parts = env_val.split(":", 1)
-        if len(parts) == 2:
-            _PATH_MAPS.append((parts[0], parts[1]))
-
-
-def resolve_path(path: str) -> str:
-    """Translate a host path to a container path if running in Docker."""
-    for host_prefix, container_prefix in _PATH_MAPS:
-        if path.startswith(host_prefix):
-            return path.replace(host_prefix, container_prefix, 1)
-    return path
-
-
-def reverse_path(path: str) -> str:
-    """Translate a container path back to a host path for display."""
-    for host_prefix, container_prefix in _PATH_MAPS:
-        if path.startswith(container_prefix):
-            return path.replace(container_prefix, host_prefix, 1)
-    return path
-
 
 @asynccontextmanager
 async def lifespan(app):
@@ -679,6 +653,8 @@ async def dispatch(mid: str, body: DispatchOptions | None = None):
         mission = dict(rows[0])
         if mission["status"] == "running":
             raise HTTPException(400, "Mission already running")
+        if "swarm_root" in json.loads(mission.get("tags") or "[]"):
+            raise HTTPException(400, "Swarm roots are containers, not coding missions — dispatch their children")
 
         # Get last report for context
         reports = await conn.execute_fetchall(
@@ -727,6 +703,8 @@ async def resume(mid: str, body: DispatchOptions | None = None):
         mission = dict(rows[0])
         if mission["status"] == "running":
             raise HTTPException(400, "Mission already running")
+        if "swarm_root" in json.loads(mission.get("tags") or "[]"):
+            raise HTTPException(400, "Swarm roots are containers, not coding missions — dispatch their children")
 
         # Find the last session with a Claude session ID
         sessions = await conn.execute_fetchall(
