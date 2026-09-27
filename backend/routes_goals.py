@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 import db
 import goals
 
-router = APIRouter(tags=["goals"])
+router = APIRouter(prefix="/api", tags=["goals"])
 
 
 class GoalCreate(BaseModel):

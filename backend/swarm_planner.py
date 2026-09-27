@@ -32,9 +32,9 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
 
 import db
+import goals
 from paths import resolve_path
 
 log = logging.getLogger("devfleet.swarm_planner")
@@ -109,29 +109,6 @@ Rules:
 - priority: higher runs first when slots are scarce (0-5).
 - Every task must run the project's tests/lint/build before finishing and keep fixing until they pass.
 """
-
-
-# ── Goal record stub ──
-# Track 3 (goals.py / goals_registry) is the durable source of truth for a
-# project's goal. Until it lands, swarms keep a local record of the same
-# shape. At integration, replace these two functions with
-# goals.create_goal / goals.get_active_goal.
-_goal_stub: dict[str, dict] = {}
-
-
-async def _record_goal(project_id: str, goal_text: str) -> str:
-    goal_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
-    _goal_stub[project_id] = {
-        "id": goal_id, "project_id": project_id, "goal_text": goal_text,
-        "status": "active", "max_iterations": 1, "current_iteration": 1,
-        "created_at": now, "updated_at": now, "stopped_reason": None,
-    }
-    return goal_id
-
-
-async def get_active_goal(project_id: str) -> dict | None:
-    return _goal_stub.get(project_id)
 
 
 async def _collect_sdk_output(messages) -> str:
@@ -343,13 +320,20 @@ async def launch_swarm(project_id: str, goal: str, max_agents: int) -> str:
         raise LookupError(f"Project path not found: {project_path}")
 
     tasks = await plan_swarm(goal, project_path, max_agents)
-    goal_id = await _record_goal(project_id, goal)
+    goal_id = await goals.create_goal(project_id, goal, max_iterations=1)
 
     root_id = str(uuid.uuid4())
     child_ids = [str(uuid.uuid4()) for _ in tasks]
 
     conn = await db.get_db()
     try:
+        # BEGIN IMMEDIATE takes SQLite's write lock right away instead of at the
+        # first write (the default "deferred" behavior), so the mission_number
+        # read below and every insert in this transaction are atomic against any
+        # other connection's mission insert (app.py's included) for as long as
+        # this transaction is open — closing the read-then-write race a plain
+        # SELECT MAX + separate INSERT would otherwise leave.
+        await conn.execute("BEGIN IMMEDIATE")
         num_rows = await conn.execute_fetchall(
             "SELECT COALESCE(MAX(mission_number), 0) + 1 AS next_num FROM missions WHERE project_id=?",
             (project_id,),
@@ -398,7 +382,7 @@ async def get_swarm_status(swarm_id: str) -> dict | None:
     try:
         rows = await conn.execute_fetchall(
             """SELECT m.* FROM missions m
-               WHERE m.id=? AND EXISTS (
+               WHERE m.id=? AND json_valid(m.tags) AND EXISTS (
                  SELECT 1 FROM json_each(m.tags) t WHERE t.value=?
                )""",
             (swarm_id, SWARM_ROOT_TAG),

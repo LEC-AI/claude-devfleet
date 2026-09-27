@@ -25,6 +25,14 @@ if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
 import db  # noqa: E402
+
+# When this module runs alongside others under backend/tests/ (pytest collects
+# conftest.py first, which imports db before the env var above is set), db.DB_PATH
+# is already frozen to the real default path — the env var alone is too late.
+# DB_PATH is read fresh on every db.get_db() call, so overwriting it directly
+# here (same technique conftest.py's own monkeypatch uses) is what actually
+# isolates this suite, regardless of import order.
+db.DB_PATH = os.environ["DEVFLEET_DB"]
 import night_window as nw  # noqa: E402
 from night_window import is_within_window, is_project_in_window, get_active_window  # noqa: E402
 

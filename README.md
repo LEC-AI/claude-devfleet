@@ -150,6 +150,17 @@ docker compose up -d
 - **Scheduled Agents** — Set cron schedules on template missions for recurring tasks (nightly tests, daily reviews, periodic maintenance)
 - **Mission Events** — Full event log for observability: auto_dispatched, dependency_met, dispatch_failed
 
+### Goal-Driven Swarms & Night-Window Scheduling
+
+- **Swarm Fan-Out Planner** — Give it a goal; one Claude call decomposes it into a full dependency graph of missions, inserted and dispatched all at once via the existing mission watcher (`POST /api/projects/{id}/swarms`)
+- **Swarm Observability** — Live tree view of a swarm's missions, per-node status and cost, polls while anything is still running (`GET /api/swarms/{id}/tree`, Swarms tab in the UI)
+- **Persistent Goals** — A project's goal survives a restart, with pause/resume/stop and iteration tracking (`/api/projects/{id}/goals`)
+- **Capacity Manager** — Day/night concurrency limits, global or per-project (`/api/capacity`)
+- **Night-Window Scheduling** — Configure a per-project dispatch window (e.g. 23:00–07:00) so overnight agent capacity gets used deliberately (`/api/projects/{id}/window`)
+- **Nightly Summaries** — Per-window rollup of what ran, what it cost, and what it produced (`/api/projects/{id}/nightly-runs`)
+
+All six have a working data model and API today. **Capacity limits and the night-window gate don't affect real dispatch yet** — that wiring into the mission watcher and auto-loop is still open; see `CLAUDE.md`.
+
 ### MCP Ecosystem
 
 Every dispatched agent automatically gets two stdio MCP servers attached:

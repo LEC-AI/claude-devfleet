@@ -167,9 +167,9 @@ export default function MissionDetail({ id, navigate }) {
   if (!mission) return <div className="text-muted">Loading...</div>;
 
   const canEdit = mission.status !== 'running';
-  const canDispatch = mission.status !== 'running';
   let isSwarmRoot = false;
   try { isSwarmRoot = JSON.parse(mission.tags || '[]').includes('swarm_root'); } catch {}
+  const canDispatch = mission.status !== 'running' && !isSwarmRoot;
 
   return (
     <div>

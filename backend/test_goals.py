@@ -84,7 +84,7 @@ async def check_routes():
 
     # A stub app exercises real HTTP validation without starting dispatch services.
     app = FastAPI()
-    app.include_router(router, prefix="/api")
+    app.include_router(router)  # router now self-declares prefix="/api", matching its siblings
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         url = "/api/projects/other/goals"
         response = await client.get(url)

@@ -8,12 +8,6 @@ MAX_CONCURRENT_AGENTS. Owns the capacity_config table: a per-project (or
 global, project_id IS NULL) pair of day_limit/night_limit, plus an optional
 reference to a Track 2 night_windows row.
 
-Standalone by design: Track 2 (backend/night_window.py) doesn't exist on
-this branch yet, so `is_within_window` is imported from it when available
-and a local stub with the identical signature is used otherwise. The stub
-is swapped out automatically the moment night_window.py lands — no code
-change needed here.
-
 This module does not modify autoloop.py or mission_watcher.py. Wiring
 `available_slots()` into those two files' dispatch loops is an integration
 step, not part of this track (see spec's "Contract for other tracks").
@@ -23,10 +17,10 @@ import logging
 import os
 import sqlite3
 import uuid
-from datetime import datetime, time, timezone
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 import db
+from night_window import is_within_window
 
 log = logging.getLogger("devfleet.capacity")
 
@@ -43,35 +37,6 @@ class InvalidCapacityConfig(ValueError):
 
 class ProjectNotFound(LookupError):
     """project_id doesn't reference an existing row in the projects table."""
-
-try:
-    from night_window import is_within_window  # Track 2 — used once it lands on this branch
-except ImportError:
-    def is_within_window(window: dict, now: datetime) -> bool:
-        """Local stub matching Track 2's contract
-        (backend/night_window.py::is_within_window(window, now) -> bool).
-
-        Pure function: does `window` (start_time/end_time as "HH:MM", possibly
-        wrapping past midnight, e.g. 23:00-07:00, interpreted in `window["timezone"]`)
-        contain `now`? `now` is converted into the window's own timezone before
-        comparing — comparing raw UTC clock time against a local-time window would
-        be off by the zone's UTC offset (and wrong for half the year across a DST
-        transition like Europe/London).
-        """
-        tz = ZoneInfo(window.get("timezone") or "UTC")
-        if now.tzinfo is None:
-            now = now.replace(tzinfo=timezone.utc)
-        current = now.astimezone(tz).time()
-        start = _parse_hhmm(window["start_time"])
-        end = _parse_hhmm(window["end_time"])
-        if start <= end:
-            return start <= current < end
-        return current >= start or current < end
-
-
-def _parse_hhmm(value: str) -> time:
-    hour, minute = value.split(":")
-    return time(int(hour), int(minute))
 
 
 async def _fetch_config_row(project_id: str | None) -> dict | None:

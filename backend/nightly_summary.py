@@ -172,10 +172,28 @@ def _parse_ts(value) -> Optional[datetime]:
 
 
 def _parse_hhmm(value: str) -> tuple[int, int]:
-    hour, minute = (int(part) for part in value.strip().split(":", 1))
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        raise ValueError(f"Invalid HH:MM time: {value!r}")
-    return hour, minute
+    """Strict HH:MM, delegating to night_window's validator so the two modules
+    can't drift on what counts as a valid time (night_window's is the stricter
+    of the two: exact width, ASCII digits only)."""
+    from night_window import _parse_hhmm as _minutes_since_midnight
+    return divmod(_minutes_since_midnight(value), 60)
+
+
+def _local_wall(base: datetime, hour: int, minute: int) -> datetime:
+    """base's date at hour:minute, in base's own tz — nudged past a DST spring-forward
+    gap (e.g. 01:30 Europe/London doesn't exist on transition day; plain .replace()
+    resolves it using the pre-transition offset, silently landing an hour off).
+
+    Detected via round-trip: a real wall-clock time survives naive -> aware ->
+    UTC -> back to aware unchanged. A gap time comes back shifted forward by
+    the gap size, so adding that shift lands on the first valid instant after it.
+    An ambiguous fall-back time round-trips clean either way (fold=0 default),
+    so it's left alone — both resolutions are equally valid for a rollup window.
+    """
+    naive = base.replace(hour=hour, minute=minute, second=0, microsecond=0, tzinfo=None)
+    aware = naive.replace(tzinfo=base.tzinfo)
+    roundtrip = aware.astimezone(timezone.utc).astimezone(base.tzinfo).replace(tzinfo=None)
+    return aware + (roundtrip - naive)
 
 
 def last_closed_window(now: datetime, start: str, end: str,
@@ -189,12 +207,12 @@ def last_closed_window(now: datetime, start: str, end: str,
     start_h, start_m = _parse_hhmm(start)
     end_h, end_m = _parse_hhmm(end)
 
-    until = local_now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+    until = _local_wall(local_now, end_h, end_m)
     if until > local_now:
-        until -= timedelta(days=1)
-    since = until.replace(hour=start_h, minute=start_m)
+        until = _local_wall(until - timedelta(days=1), end_h, end_m)
+    since = _local_wall(until, start_h, start_m)
     if since >= until:
-        since -= timedelta(days=1)
+        since = _local_wall(since - timedelta(days=1), start_h, start_m)
     return since.astimezone(timezone.utc), until.astimezone(timezone.utc)
 
 
