@@ -34,7 +34,7 @@ Mechanics already in DevFleet (don't reimplement):
    #   "depends_on": ["<previous mission id>"], "mission_type": "implement", "priority": 0}
    ```
    Build the JSON with python `json.dump`, never by hand-escaping. Write them to a temp dir, not the repo.
-7. **Confirm** with the mission ids/numbers and the window start time. If it's already inside the window, say it starts within seconds.
+7. **Confirm** with the mission ids/numbers. A queued mission shows `status: draft` with `auto_dispatch: 1` until the window opens; that is the expected queued state. Give the window start time: read it from the DevFleet checkout's `.env` if you can find it, else assume the default 20:00 to 08:00. If it's already inside the window, say it starts within seconds.
 
 ## Mode 2: `/nightshift report`
 

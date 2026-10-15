@@ -444,12 +444,13 @@ Works with: Claude Code, Cursor, Windsurf, Cline, and any MCP-compatible agent.
 
 ### Missions
 - `GET /api/missions` — List missions (filter: `project_id`, `status`, `tag`, `parent_mission_id`)
-- `POST /api/missions` — Create mission (supports `parent_mission_id`, `depends_on`, `auto_dispatch`, `schedule_cron`)
+- `POST /api/missions` — Create mission (supports `parent_mission_id`, `depends_on`, `auto_dispatch`, `schedule_cron`; `tags: ["night"]` makes it a Night Shift mission)
 - `GET /api/missions/{id}` — Get mission with sessions, latest report, and children
 - `PUT /api/missions/{id}` — Update mission
 - `DELETE /api/missions/{id}` — Delete mission
 - `POST /api/missions/{id}/dispatch` — Dispatch agent
-- `POST /api/missions/{id}/resume` — Resume failed session
+- `POST /api/missions/{id}/resume` — Resume failed session (Night Shift calls this automatically for rate-limited night missions)
+- `POST /api/missions/{id}/recover` — Merge a `merge_blocked` mission's branch by hand (refused for night missions)
 - `POST /api/missions/{id}/generate-next` — Generate follow-up mission from report
 - `POST /api/missions/{id}/remote-control` — Start interactive remote-control session
 - `GET /api/missions/{id}/children` — List child/sub-missions
@@ -528,6 +529,8 @@ docker top devfleet-api | grep claude  # check before restarting
 | Claude DevFleet UI (local dev) | 3100 |
 | Claude DevFleet API | 18801 |
 | Agent Preview | 4321 |
+
+`start.sh` takes the local API and UI ports from `DEVFLEET_PORT` / `DEVFLEET_UI_PORT` in `.env`. The examples in this README and in `integrations/` use the defaults; substitute your port if you changed it.
 
 ## Environment Variables
 

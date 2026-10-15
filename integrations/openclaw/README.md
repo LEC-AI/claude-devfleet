@@ -200,8 +200,8 @@ Claude calls `mcp__devfleet__cancel_mission(mission_id="...")` → stops the age
 
 ## Notes
 
-- DevFleet runs agents locally using Claude Code SDK — you need a valid Anthropic API key
-- Each agent runs in an isolated git worktree and auto-merges on completion
+- DevFleet runs agents locally using Claude Code SDK — Claude Code must be logged in (a Claude plan, or an Anthropic API key billed per token)
+- Each agent runs in an isolated git worktree and auto-merges on completion (night missions land on a `nightshift` branch instead)
 - Missions can have dependencies — the mission watcher auto-dispatches when deps are met
 - Max 3 concurrent agents by default (configurable via `DEVFLEET_MAX_AGENTS`)
 - The DevFleet skill teaches Claude the right tool-calling patterns — without it, Claude can still use the MCP tools but may not follow the optimal workflow

@@ -35,10 +35,13 @@ Not yet a background service, despite having a full data + API layer: per-projec
 ## Build & Run Commands
 
 ```bash
-# Local dev (recommended)
+# One command (loads .env, installs deps + the /nightshift skill, starts API + UI)
+./start.sh                    # ports from DEVFLEET_PORT / DEVFLEET_UI_PORT, default 18801 / 3100
+
+# Local dev by hand
 python3 -m venv venv && source venv/bin/activate
 pip install -r backend/requirements.txt
-cd backend && uvicorn app:app --host 0.0.0.0 --port 18801 --reload
+cd backend && uvicorn app:app --host 127.0.0.1 --port 18801 --reload
 cd frontend && npm run dev    # port 3100
 
 # Docker
@@ -55,6 +58,9 @@ No linting is configured. Tests:
 - Standalone, framework-free checks — run directly with `python3 <file>` from `backend/`: `test_goals.py`, `test_capacity.py`, `test_swarm_planner.py`, `test_swarm_tree.py`.
 
 ## Key Files
+- `SETUP.md` — Machine setup runbook written for a Claude Code session to execute end to end (keep it in sync with `start.sh` and `.env.example`)
+- `start.sh` / `.env.example` — Local launcher and its settings (ports, bind host, night window, max agents)
+- `integrations/claude-code/skills/nightshift/SKILL.md` — `/nightshift` skill, copied into `~/.claude/skills/` by `start.sh`
 - `backend/app.py` — FastAPI routes: projects, missions, dispatch, resume, remote-control, sessions, reports, dashboard, auto-loop, scheduling, system status, MCP configs, services, health checks, incidents
 - `backend/sdk_engine.py` — SDK dispatch engine: claude-code-sdk streaming, stdio MCP server attachment, report file pickup, per-project MCP config loading, cost tracking
 - `backend/mission_watcher.py` — Auto-dispatch engine: polls for eligible missions, checks `depends_on` via `json_each`, dispatches to available slots, emits mission_events
@@ -142,3 +148,5 @@ Tool naming in allowed_tools: `mcp__devfleet-context__get_mission_context`, `mcp
 | Claude DevFleet UI (Docker) | 3101 |
 | Claude DevFleet UI (local dev) | 3100 |
 | Claude DevFleet API | 18801 |
+
+Local ports are defaults: `start.sh` reads `DEVFLEET_PORT` / `DEVFLEET_UI_PORT` from `.env`.
