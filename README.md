@@ -101,7 +101,7 @@ The [Claude Code setup](#set-up-with-claude-code-easiest) above does steps 1–3
 
 1. **Log Claude Code in with your plan** (`claude auth login`). Night Shift exists to use your plan's 5-hour usage blocks; with `ANTHROPIC_API_KEY` set, every token is billed instead.
 2. **Start DevFleet:** `cp .env.example .env`, set `DEVFLEET_NIGHT_TZ` to your timezone, then `./start.sh`. This also installs the `/nightshift` skill into `~/.claude/skills/`.
-3. **Keep the machine awake and DevFleet running overnight.** On macOS: `nohup caffeinate -i ./start.sh > data/devfleet.log 2>&1 &`, on power. On Linux: `nohup ./start.sh > data/devfleet.log 2>&1 &`.
+3. **Keep the machine awake and DevFleet running overnight.** On macOS: `mkdir -p data && nohup caffeinate -i ./start.sh > data/devfleet.log 2>&1 &`, on power. On Linux: `mkdir -p data && nohup ./start.sh > data/devfleet.log 2>&1 &`.
 4. **Plan tonight's work:** open Claude Code in your project repo and run `/nightshift`, then describe what you want. It registers the repo with DevFleet if needed, reads the code, asks about anything ambiguous, shows you the plan, and queues it once you say yes.
 5. **Morning:** `/nightshift report` lists what finished, what failed and why, and the commits waiting on the `nightshift` branch. Merge what you like.
 

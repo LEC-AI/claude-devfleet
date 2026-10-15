@@ -52,10 +52,10 @@ It takes effect in new Claude Code sessions.
 
 `start.sh` runs in the foreground until stopped. Start it detached so it outlives this session:
 
-- **macOS:** `nohup caffeinate -i ./start.sh > data/devfleet.log 2>&1 &`. `caffeinate` stops the Mac idle-sleeping while DevFleet runs. Tell the user to keep the Mac on power and the lid open, or connected to a display, overnight.
-- **Linux:** `nohup ./start.sh > data/devfleet.log 2>&1 &`
+- **macOS:** `mkdir -p data && nohup caffeinate -i ./start.sh > data/devfleet.log 2>&1 &`. `caffeinate` stops the Mac idle-sleeping while DevFleet runs. Tell the user to keep the Mac on power and the lid open, or connected to a display, overnight.
+- **Linux:** `mkdir -p data && nohup ./start.sh > data/devfleet.log 2>&1 &`
 
-The first start installs Python and Node dependencies, which can take a few minutes. Run `mkdir -p data` first if `data/` doesn't exist.
+The first start installs Python and Node dependencies, which can take a few minutes.
 
 ## 5. Verify
 
@@ -86,4 +86,4 @@ Tell the user:
 1. **Plan tonight's work:** open Claude Code in a registered repo, run `/nightshift`, and describe what to build. It asks questions, shows a plan, and queues it once they approve. Agents run between the window's start and end times.
 2. **Morning:** run `/nightshift report`. Night work waits on each repo's `nightshift` branch and never touches `main`; merging is up to them.
 3. **After a reboot**, start DevFleet again with the step 4 command.
-4. **Stop DevFleet:** `pkill -f 'port <DEVFLEET_PORT> --reload'` and `pkill -f 'vite --port <DEVFLEET_UI_PORT>'`, using the actual numbers. These match only this user's processes.
+4. **Stop DevFleet:** `pkill -f 'port <DEVFLEET_PORT> --reload'` and `pkill -f 'vite --port <DEVFLEET_UI_PORT>'`, using the actual numbers (`pkill` can only stop your own processes).
