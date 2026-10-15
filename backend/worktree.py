@@ -33,8 +33,12 @@ async def is_git_repo(path: str) -> bool:
     return code == 0
 
 
-async def create_worktree(project_path: str, session_id: str) -> str | None:
-    """Create an isolated git worktree for this session. Returns worktree path or None if not a git repo."""
+NIGHT_BRANCH = "nightshift"
+
+
+async def create_worktree(project_path: str, session_id: str, base: str = "HEAD") -> str | None:
+    """Create an isolated git worktree for this session. Returns worktree path or None if not a git repo.
+    Reuses the session's existing worktree (resume path) instead of falling back to the live checkout."""
     if not await is_git_repo(project_path):
         log.info("Project %s is not a git repo — skipping worktree isolation", project_path)
         return None
@@ -44,11 +48,18 @@ async def create_worktree(project_path: str, session_id: str) -> str | None:
     worktree_dir = os.path.join(project_path, ".devfleet-worktrees")
     worktree_path = os.path.join(worktree_dir, f"session-{short_id}")
 
+    if os.path.isdir(worktree_path):
+        return worktree_path
+
     os.makedirs(worktree_dir, exist_ok=True)
 
-    # Create worktree on a new branch from HEAD
+    # Night missions stack on one review branch; create it from HEAD the first time.
+    if base != "HEAD":
+        await _run(["git", "branch", base, "HEAD"], project_path)  # no-op if it exists
+
+    # Create worktree on a new branch from base
     code, out, err = await _run(
-        ["git", "worktree", "add", "-b", branch_name, worktree_path, "HEAD"],
+        ["git", "worktree", "add", "-b", branch_name, worktree_path, base],
         project_path,
     )
     if code != 0:
@@ -72,7 +83,7 @@ async def create_worktree(project_path: str, session_id: str) -> str | None:
     return worktree_path
 
 
-async def cleanup_worktree(project_path: str, session_id: str, merge: bool = False):
+async def cleanup_worktree(project_path: str, session_id: str, merge: bool = False, into: str | None = None):
     """Remove a worktree. Optionally merge its branch first.
 
     Merge is done via git plumbing (`merge-tree` + `commit-tree` + `update-ref`)
@@ -98,7 +109,10 @@ async def cleanup_worktree(project_path: str, session_id: str, merge: bool = Fal
             )
             log.info("auto-committed uncommitted changes for session %s", short_id)
 
-        merged_ok = await _merge_branch_via_plumbing(project_path, branch_name, short_id)
+        if into:
+            merged_ok = await _fast_forward(project_path, branch_name, into)
+        else:
+            merged_ok = await _merge_branch_via_plumbing(project_path, branch_name, short_id)
         if not merged_ok:
             # Worktree + branch preserved so a human / recover_mission can salvage.
             return False
@@ -116,6 +130,22 @@ async def cleanup_worktree(project_path: str, session_id: str, merge: bool = Fal
 
     log.info("Cleaned up worktree for session %s (merge=%s)", short_id, merge)
     return True
+
+
+async def _fast_forward(project_path: str, branch_name: str, into: str) -> bool:
+    """Move `into` to `branch_name` only if that is a fast-forward. The watcher runs
+    one night mission per project at a time, so this holds unless someone moved
+    the review branch mid-mission; then the worktree is kept for a human."""
+    code, new_sha, _ = await _run(["git", "rev-parse", branch_name], project_path)
+    code2, old_sha, _ = await _run(["git", "rev-parse", f"refs/heads/{into}"], project_path)
+    if code or code2:
+        return False
+    code, _, _ = await _run(["git", "merge-base", "--is-ancestor", old_sha, new_sha], project_path)
+    if code:
+        log.warning("%s is not a fast-forward of %s; preserving worktree", branch_name, into)
+        return False
+    code, _, _ = await _run(["git", "update-ref", f"refs/heads/{into}", new_sha, old_sha], project_path)
+    return code == 0
 
 
 async def _merge_branch_via_plumbing(project_path: str, branch_name: str, short_id: str) -> bool:

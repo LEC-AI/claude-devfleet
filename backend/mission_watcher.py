@@ -18,7 +18,10 @@ import os
 import uuid
 from datetime import datetime, timezone
 
+import httpx
+
 import db
+from night_window import is_within_window
 
 log = logging.getLogger("devfleet.mission_watcher")
 
@@ -26,9 +29,29 @@ _watcher_task: asyncio.Task | None = None
 POLL_INTERVAL = int(os.environ.get("DEVFLEET_WATCHER_INTERVAL", "5"))
 MAX_CONCURRENT_AGENTS = int(os.environ.get("DEVFLEET_MAX_AGENTS", "3"))
 
+# Night shift: missions tagged "night" only dispatch inside this window, and ones
+# that die on quota/transient errors auto-resume every NIGHT_RESUME_GAP_MIN until
+# they finish or hit NIGHT_RESUME_MAX attempts.
+NIGHT_WINDOW = {
+    "start_time": os.environ.get("DEVFLEET_NIGHT_START", "20:00"),
+    "end_time": os.environ.get("DEVFLEET_NIGHT_END", "08:00"),
+    "timezone": "Europe/London",
+}
+NIGHT_RESUME_GAP_MIN = int(os.environ.get("DEVFLEET_NIGHT_RESUME_GAP_MIN", "20"))
+NIGHT_RESUME_MAX = int(os.environ.get("DEVFLEET_NIGHT_RESUME_MAX", "30"))
+API_URL = os.environ.get("DEVFLEET_API_URL", "http://localhost:18801")
+RESUMABLE_ERRORS = ("rate_limit_exhausted", "transient_exhausted", "unknown_early_exit")
+NIGHT_TAG_SQL = "EXISTS (SELECT 1 FROM json_each(m.tags) t WHERE t.value = 'night')"
+
+
+def in_night_window() -> bool:
+    return is_within_window(NIGHT_WINDOW, datetime.now(timezone.utc))
+
 
 async def _find_eligible_missions(limit: int) -> list[dict]:
-    """Find auto_dispatch missions whose dependencies are all completed."""
+    """Find auto_dispatch missions whose dependencies are all completed.
+    Night-tagged missions are skipped outside the night window."""
+    night_ok = 1 if in_night_window() else 0
     conn = await db.get_db()
     try:
         # SQLite json_each lets us check each dependency ID is completed
@@ -44,13 +67,64 @@ async def _find_eligible_missions(limit: int) -> list[dict]:
                      SELECT id FROM missions WHERE status = 'completed'
                    )
                  )
+                 AND (NOT """ + NIGHT_TAG_SQL + """ OR (? = 1 AND NOT EXISTS (
+                   SELECT 1 FROM missions r WHERE r.project_id = m.project_id
+                     AND r.status = 'running'
+                     AND EXISTS (SELECT 1 FROM json_each(r.tags) t WHERE t.value = 'night'))))
                ORDER BY m.priority DESC, m.created_at ASC
                LIMIT ?""",
-            (limit,),
+            (night_ok, limit),
         )
         return [dict(r) for r in rows]
     finally:
         await conn.close()
+
+
+async def _find_resumable_night_missions(limit: int) -> list[str]:
+    """Failed night missions whose latest session died on a resumable error at
+    least NIGHT_RESUME_GAP_MIN ago and that are under the auto-resume cap."""
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall(
+            """SELECT m.id FROM missions m
+               JOIN agent_sessions s ON s.id = (
+                 SELECT id FROM agent_sessions WHERE mission_id = m.id
+                 ORDER BY started_at DESC LIMIT 1)
+               WHERE m.status = 'failed' AND """ + NIGHT_TAG_SQL + """
+                 AND s.error_type IN (?, ?, ?)
+                 AND s.claude_session_id IS NOT NULL AND s.claude_session_id != ''
+                 AND datetime(s.ended_at) <= datetime('now', ?)
+                 AND (SELECT COUNT(*) FROM mission_events e
+                      WHERE e.mission_id = m.id AND e.event_type = 'night_auto_resumed') < ?
+                 AND NOT EXISTS (SELECT 1 FROM mission_events e
+                      WHERE e.mission_id = m.id AND e.event_type = 'night_auto_resumed'
+                        AND datetime(e.created_at) > datetime('now', ?))
+               ORDER BY m.priority DESC, m.created_at ASC
+               LIMIT ?""",
+            (*RESUMABLE_ERRORS, f"-{NIGHT_RESUME_GAP_MIN} minutes", NIGHT_RESUME_MAX,
+             f"-{NIGHT_RESUME_GAP_MIN} minutes", limit),
+        )
+        return [r["id"] for r in rows]
+    finally:
+        await conn.close()
+
+
+async def _auto_resume_night(slots: int) -> int:
+    """Resume quota-killed night missions through the API's own resume route."""
+    if slots <= 0 or not in_night_window():
+        return 0
+    resumed = 0
+    async with httpx.AsyncClient(timeout=15) as client:
+        for mid in await _find_resumable_night_missions(slots):
+            try:
+                r = await client.post(f"{API_URL}/api/missions/{mid}/resume", json={})
+                code = r.status_code
+            except httpx.HTTPError as e:
+                code = str(e)[:100]
+            await _emit_event(mid, "night_auto_resumed", data={"http": code})
+            log.info("Night auto-resume %s -> %s", mid, code)
+            resumed += code == 200
+    return resumed
 
 
 async def _emit_event(mission_id: str, event_type: str, source_mission_id: str | None = None, data: dict | None = None):
@@ -128,6 +202,8 @@ async def _watch_loop():
 
             running = sum(1 for t in running_tasks.values() if not t.done())
             slots = MAX_CONCURRENT_AGENTS - running
+
+            slots -= await _auto_resume_night(slots)
 
             if slots > 0:
                 eligible = await _find_eligible_missions(limit=slots)
