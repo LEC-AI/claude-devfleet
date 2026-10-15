@@ -102,6 +102,9 @@ During the cross-track integration pass:
    respects paused/stopped status, and enforces the stored iteration limit.
 4. Register the remaining routers, integrate night-window guards and capacity,
    connect nightly summaries, then run the real overnight swarm smoke test.
+   (Update: the global Night Shift window, auto-resume and `nightshift` branch
+   landed in PR #12; per-project windows, capacity limits and automatic nightly
+   summaries are still not wired into dispatch.)
 
 `autoloop.py`, `mission_watcher.py`, `scheduler.py`, `sdk_engine.py`, and other
 tracks' files are unchanged. This track does not address the pre-merge quality

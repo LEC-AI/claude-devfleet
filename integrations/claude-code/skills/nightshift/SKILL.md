@@ -8,7 +8,7 @@ description: Turn new requirements into a planned build list that DevFleet agent
 DevFleet does the execution. API base: `$DEVFLEET_API_URL`, default `http://localhost:18801` (called `$API` below). This skill does the part agents can't do alone at 2am: understand the project, close every ambiguity with the user NOW, and write missions precise enough to finish without a human.
 
 Mechanics already in DevFleet (don't reimplement):
-- Missions tagged `night` with `auto_dispatch: true` only dispatch inside the night window (`DEVFLEET_NIGHT_START`/`DEVFLEET_NIGHT_END`, default 20:00–08:00 Europe/London).
+- Missions tagged `night` with `auto_dispatch: true` only dispatch inside the night window (`DEVFLEET_NIGHT_START`/`DEVFLEET_NIGHT_END` in `DEVFLEET_NIGHT_TZ`, default 20:00–08:00 Europe/London; set in the DevFleet checkout's `.env`).
 - A mission killed by a quota or transient error auto-resumes its own Claude session every 20 min (max 30 tries; `DEVFLEET_NIGHT_RESUME_GAP_MIN`, `DEVFLEET_NIGHT_RESUME_MAX`) while the window is open. A 5-hour quota block running out costs a pause, not the mission.
 - Successful night missions fast-forward a per-repo `nightshift` branch. `main` is never touched. The user reviews and merges in the morning.
 
@@ -34,7 +34,7 @@ Mechanics already in DevFleet (don't reimplement):
    #   "depends_on": ["<previous mission id>"], "mission_type": "implement", "priority": 0}
    ```
    Build the JSON with python `json.dump`, never by hand-escaping. Write them to a temp dir, not the repo.
-7. **Confirm** with the mission ids/numbers and the window start time. If it's already inside the window, say it starts within seconds.
+7. **Confirm** with the mission ids/numbers. A queued mission shows `status: draft` with `auto_dispatch: 1` until the window opens; that is the expected queued state. Give the window start time: read it from the DevFleet checkout's `.env` if you can find it, else assume the default 20:00 to 08:00. If it's already inside the window, say it starts within seconds.
 
 ## Mode 2: `/nightshift report`
 

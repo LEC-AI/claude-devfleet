@@ -6,6 +6,16 @@ Multi-agent coding platform that dispatches [Claude Code](https://docs.anthropic
 
 Built on the Claude Code SDK and MCP (Model Context Protocol) ecosystem.
 
+## Set up with Claude Code (easiest)
+
+Open Claude Code anywhere and say:
+
+```
+Set up https://github.com/LEC-AI/claude-devfleet on this machine by following its SETUP.md
+```
+
+It checks the prerequisites, clones the repo, configures your timezone, starts DevFleet in the background, installs the `/nightshift` skill, and asks which of your repos to register. To do it by hand instead, follow [SETUP.md](SETUP.md) yourself.
+
 ## Architecture
 
 ```
@@ -71,8 +81,7 @@ Claude DevFleet supports two dispatch engines, selectable via `DEVFLEET_ENGINE`:
 
 - Python 3.11+ (for backend)
 - Node.js 18+ (for frontend)
-- [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) installed
-- Anthropic API key configured in Claude CLI
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and logged in (`claude auth status`). A Claude plan login uses your plan's usage; an `ANTHROPIC_API_KEY` is billed per token
 
 ### Option A: One-command start (recommended)
 
@@ -88,13 +97,15 @@ cd claude-devfleet
 
 Use spare overnight Claude quota to work through your build list while you sleep.
 
-1. **Log Claude Code in with your subscription** (`claude`, then `/login`). Night Shift exists to use your plan's 5-hour usage blocks; with `ANTHROPIC_API_KEY` set, every token is billed instead.
-2. **Start DevFleet:** `./start.sh`. This also installs the `/nightshift` skill into `~/.claude/skills/`.
-3. **Keep the machine awake and the API running overnight.** On macOS: `caffeinate -i ./start.sh`, on power. On Linux, run it under `tmux`, `systemd` or similar.
+The [Claude Code setup](#set-up-with-claude-code-easiest) above does steps 1–3 for you.
+
+1. **Log Claude Code in with your plan** (`claude auth login`). Night Shift exists to use your plan's 5-hour usage blocks; with `ANTHROPIC_API_KEY` set, every token is billed instead.
+2. **Start DevFleet:** `cp .env.example .env`, set `DEVFLEET_NIGHT_TZ` to your timezone, then `./start.sh`. This also installs the `/nightshift` skill into `~/.claude/skills/`.
+3. **Keep the machine awake and DevFleet running overnight.** On macOS: `mkdir -p data && nohup caffeinate -i ./start.sh > data/devfleet.log 2>&1 &`, on power. On Linux: `mkdir -p data && nohup ./start.sh > data/devfleet.log 2>&1 &`.
 4. **Plan tonight's work:** open Claude Code in your project repo and run `/nightshift`, then describe what you want. It registers the repo with DevFleet if needed, reads the code, asks about anything ambiguous, shows you the plan, and queues it once you say yes.
 5. **Morning:** `/nightshift report` lists what finished, what failed and why, and the commits waiting on the `nightshift` branch. Merge what you like.
 
-Change the window with `DEVFLEET_NIGHT_START` / `DEVFLEET_NIGHT_END` (HH:MM, Europe/London).
+Change the window with `DEVFLEET_NIGHT_START` / `DEVFLEET_NIGHT_END` (HH:MM) and `DEVFLEET_NIGHT_TZ` in `.env`.
 
 ### Option B: Manual local setup
 
@@ -109,7 +120,7 @@ pip install -r backend/requirements.txt
 
 # Start API server
 cd backend
-uvicorn app:app --host 0.0.0.0 --port 18801 --reload
+uvicorn app:app --host 127.0.0.1 --port 18801 --reload
 
 # Frontend (separate terminal)
 cd frontend
@@ -122,7 +133,7 @@ npm install && npm run dev
 
 ```bash
 git clone https://github.com/LEC-AI/claude-devfleet.git
-cd devfleet
+cd claude-devfleet
 ```
 
 Add your project repos to `docker-compose.yml`:
@@ -171,7 +182,7 @@ docker compose up -d
 - **Night-Window Scheduling** — Configure a per-project dispatch window (e.g. 23:00–07:00) so overnight agent capacity gets used deliberately (`/api/projects/{id}/window`)
 - **Nightly Summaries** — Per-window rollup of what ran, what it cost, and what it produced (`/api/projects/{id}/nightly-runs`)
 
-- **Night Shift** — Tag missions `night` and they run unattended inside a global window (default 20:00–08:00 Europe/London), resume their own session after rate-limit or transient failures (every 20 min, up to 30 tries), run one at a time per repo, and land on a `nightshift` branch instead of main for morning review. The `/nightshift` Claude Code skill (`integrations/claude-code/`) turns requirements into a queued night build list after asking you about anything ambiguous.
+- **Night Shift** — Tag missions `night` and they run unattended inside a global window (default 20:00–08:00, `DEVFLEET_NIGHT_TZ`), resume their own session after rate-limit or transient failures (every 20 min, up to 30 tries), run one at a time per repo, and land on a `nightshift` branch instead of main for morning review. The `/nightshift` Claude Code skill (`integrations/claude-code/`) turns requirements into a queued night build list after asking you about anything ambiguous.
 
 All six have a working data model and API today. **Per-project capacity limits and per-project night windows don't affect real dispatch yet** (Night Shift uses its own global window) — that wiring into the mission watcher and auto-loop is still open; see `CLAUDE.md`.
 
@@ -433,12 +444,13 @@ Works with: Claude Code, Cursor, Windsurf, Cline, and any MCP-compatible agent.
 
 ### Missions
 - `GET /api/missions` — List missions (filter: `project_id`, `status`, `tag`, `parent_mission_id`)
-- `POST /api/missions` — Create mission (supports `parent_mission_id`, `depends_on`, `auto_dispatch`, `schedule_cron`)
+- `POST /api/missions` — Create mission (supports `parent_mission_id`, `depends_on`, `auto_dispatch`, `schedule_cron`; `tags: ["night"]` makes it a Night Shift mission)
 - `GET /api/missions/{id}` — Get mission with sessions, latest report, and children
 - `PUT /api/missions/{id}` — Update mission
 - `DELETE /api/missions/{id}` — Delete mission
 - `POST /api/missions/{id}/dispatch` — Dispatch agent
-- `POST /api/missions/{id}/resume` — Resume failed session
+- `POST /api/missions/{id}/resume` — Resume failed session (Night Shift calls this automatically for rate-limited night missions)
+- `POST /api/missions/{id}/recover` — Merge a `merge_blocked` mission's branch by hand (refused for night missions)
 - `POST /api/missions/{id}/generate-next` — Generate follow-up mission from report
 - `POST /api/missions/{id}/remote-control` — Start interactive remote-control session
 - `GET /api/missions/{id}/children` — List child/sub-missions
@@ -499,7 +511,7 @@ mcp_configs       (id, project_id, server_name, server_type, config_json, enable
 ```bash
 # Backend (venv)
 source venv/bin/activate
-cd backend && uvicorn app:app --host 0.0.0.0 --port 18801 --reload
+cd backend && uvicorn app:app --host 127.0.0.1 --port 18801 --reload
 
 # Frontend (local dev)
 cd frontend && npm run dev
@@ -518,6 +530,8 @@ docker top devfleet-api | grep claude  # check before restarting
 | Claude DevFleet API | 18801 |
 | Agent Preview | 4321 |
 
+`start.sh` takes the local API and UI ports from `DEVFLEET_PORT` / `DEVFLEET_UI_PORT` in `.env`. The examples in this README and in `integrations/` use the defaults; substitute your port if you changed it.
+
 ## Environment Variables
 
 | Variable | Default | Purpose |
@@ -531,7 +545,10 @@ docker top devfleet-api | grep claude  # check before restarting
 | `DEVFLEET_PROJECTS_DIR` | `projects/` | Base directory for planner-created projects |
 | `DEVFLEET_PATH_MAP_*` | — | Host:container path translation |
 | `DEVFLEET_API_URL` | `http://localhost:18801` | API base used by agents' MCP tools and night auto-resume |
-| `DEVFLEET_NIGHT_START` / `DEVFLEET_NIGHT_END` | `20:00` / `08:00` | Night Shift window (Europe/London) |
+| `DEVFLEET_NIGHT_START` / `DEVFLEET_NIGHT_END` | `20:00` / `08:00` | Night Shift window (HH:MM, in `DEVFLEET_NIGHT_TZ`) |
+| `DEVFLEET_NIGHT_TZ` | `Europe/London` | Night Shift window timezone (IANA name) |
+| `DEVFLEET_HOST` | `127.0.0.1` | API bind address used by `start.sh` (`0.0.0.0` exposes it to the network) |
+| `DEVFLEET_PORT` / `DEVFLEET_UI_PORT` | `18801` / `3100` | API and UI ports used by `start.sh` (pick free ones on a shared machine) |
 | `DEVFLEET_NIGHT_RESUME_GAP_MIN` | `20` | Minutes between auto-resume attempts for a rate-limited night mission |
 | `DEVFLEET_NIGHT_RESUME_MAX` | `30` | Max auto-resume attempts per night mission |
 

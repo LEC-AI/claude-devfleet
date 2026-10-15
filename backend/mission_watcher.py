@@ -35,7 +35,7 @@ MAX_CONCURRENT_AGENTS = int(os.environ.get("DEVFLEET_MAX_AGENTS", "3"))
 NIGHT_WINDOW = {
     "start_time": os.environ.get("DEVFLEET_NIGHT_START", "20:00"),
     "end_time": os.environ.get("DEVFLEET_NIGHT_END", "08:00"),
-    "timezone": "Europe/London",
+    "timezone": os.environ.get("DEVFLEET_NIGHT_TZ", "Europe/London"),
 }
 NIGHT_RESUME_GAP_MIN = int(os.environ.get("DEVFLEET_NIGHT_RESUME_GAP_MIN", "20"))
 NIGHT_RESUME_MAX = int(os.environ.get("DEVFLEET_NIGHT_RESUME_MAX", "30"))
@@ -45,7 +45,12 @@ NIGHT_TAG_SQL = "EXISTS (SELECT 1 FROM json_each(m.tags) t WHERE t.value = 'nigh
 
 
 def in_night_window() -> bool:
-    return is_within_window(NIGHT_WINDOW, datetime.now(timezone.utc))
+    """A bad window config holds night missions back; it never blocks day missions."""
+    try:
+        return is_within_window(NIGHT_WINDOW, datetime.now(timezone.utc))
+    except ValueError as e:
+        log.error("Invalid night window %s: %s", NIGHT_WINDOW, e)
+        return False
 
 
 async def _find_eligible_missions(limit: int) -> list[dict]:

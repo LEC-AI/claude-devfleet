@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**Asked to set up or install DevFleet on this machine? Follow [SETUP.md](SETUP.md) step by step.**
+
 # Claude DevFleet — Autonomous Coding Agent Platform
 
 ## What It Is
@@ -26,17 +28,20 @@ Started in `app.py` lifespan:
 - **Mission Watcher** (`mission_watcher.py`) — Polls every 5s for `auto_dispatch=1` missions whose dependencies are met, dispatches to available agent slots
 - **Scheduler** (`scheduler.py`) — Checks cron schedules every 60s, clones template missions with `auto_dispatch=1`
 - **Health Checker** (`health_checker.py`) — Polls monitored services for uptime
-- **Night Shift** (in `mission_watcher.py`) — Missions tagged `night` dispatch only inside `NIGHT_WINDOW` (`DEVFLEET_NIGHT_START`/`DEVFLEET_NIGHT_END`, default 20:00–08:00 Europe/London), one per project at a time. A night mission whose latest session failed with `rate_limit_exhausted`/`transient_exhausted`/`unknown_early_exit` is resumed via `POST /api/missions/{id}/resume` every `DEVFLEET_NIGHT_RESUME_GAP_MIN` (20) up to `DEVFLEET_NIGHT_RESUME_MAX` (30), logged as `night_auto_resumed` events. Night worktrees branch from and fast-forward into `nightshift` (`worktree.NIGHT_BRANCH`), never main; `/recover` refuses night missions and cwd-escaped night writes are left uncommitted rather than committed to main. Intake skill: `integrations/claude-code/skills/nightshift/`
+- **Night Shift** (in `mission_watcher.py`) — Missions tagged `night` dispatch only inside `NIGHT_WINDOW` (`DEVFLEET_NIGHT_START`/`DEVFLEET_NIGHT_END`/`DEVFLEET_NIGHT_TZ`, default 20:00–08:00 Europe/London; a bad value holds night missions back and logs an error), one per project at a time. A night mission whose latest session failed with `rate_limit_exhausted`/`transient_exhausted`/`unknown_early_exit` is resumed via `POST /api/missions/{id}/resume` every `DEVFLEET_NIGHT_RESUME_GAP_MIN` (20) up to `DEVFLEET_NIGHT_RESUME_MAX` (30), logged as `night_auto_resumed` events. Night worktrees branch from and fast-forward into `nightshift` (`worktree.NIGHT_BRANCH`), never main; `/recover` refuses night missions and cwd-escaped night writes are left uncommitted rather than committed to main. Intake skill: `integrations/claude-code/skills/nightshift/`
 
 Not yet a background service, despite having a full data + API layer: per-project night-window gating (Night Shift above uses its own global window), capacity-based concurrency limits, and automatic nightly summaries. Their modules and `/api` routes are live (see Key Files below), but nothing calls them from `mission_watcher.py`/`autoloop.py`/`scheduler.py` yet — that wiring is the next piece of work, not done in this pass.
 
 ## Build & Run Commands
 
 ```bash
-# Local dev (recommended)
+# One command (loads .env, installs deps + the /nightshift skill, starts API + UI)
+./start.sh                    # ports from DEVFLEET_PORT / DEVFLEET_UI_PORT, default 18801 / 3100
+
+# Local dev by hand
 python3 -m venv venv && source venv/bin/activate
 pip install -r backend/requirements.txt
-cd backend && uvicorn app:app --host 0.0.0.0 --port 18801 --reload
+cd backend && uvicorn app:app --host 127.0.0.1 --port 18801 --reload
 cd frontend && npm run dev    # port 3100
 
 # Docker
@@ -53,6 +58,9 @@ No linting is configured. Tests:
 - Standalone, framework-free checks — run directly with `python3 <file>` from `backend/`: `test_goals.py`, `test_capacity.py`, `test_swarm_planner.py`, `test_swarm_tree.py`.
 
 ## Key Files
+- `SETUP.md` — Machine setup runbook written for a Claude Code session to execute end to end (keep it in sync with `start.sh` and `.env.example`)
+- `start.sh` / `.env.example` — Local launcher and its settings (ports, bind host, night window, max agents)
+- `integrations/claude-code/skills/nightshift/SKILL.md` — `/nightshift` skill, copied into `~/.claude/skills/` by `start.sh`
 - `backend/app.py` — FastAPI routes: projects, missions, dispatch, resume, remote-control, sessions, reports, dashboard, auto-loop, scheduling, system status, MCP configs, services, health checks, incidents
 - `backend/sdk_engine.py` — SDK dispatch engine: claude-code-sdk streaming, stdio MCP server attachment, report file pickup, per-project MCP config loading, cost tracking
 - `backend/mission_watcher.py` — Auto-dispatch engine: polls for eligible missions, checks `depends_on` via `json_each`, dispatches to available slots, emits mission_events
@@ -140,3 +148,5 @@ Tool naming in allowed_tools: `mcp__devfleet-context__get_mission_context`, `mcp
 | Claude DevFleet UI (Docker) | 3101 |
 | Claude DevFleet UI (local dev) | 3100 |
 | Claude DevFleet API | 18801 |
+
+Local ports are defaults: `start.sh` reads `DEVFLEET_PORT` / `DEVFLEET_UI_PORT` from `.env`.
