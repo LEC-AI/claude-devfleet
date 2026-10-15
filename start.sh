@@ -47,6 +47,10 @@ source .venv/bin/activate
 "$UV" pip install -q -r requirements.txt 2>/dev/null
 cd ..
 
+# Install the /nightshift Claude Code skill (repo-owned; re-copied on every start so updates land)
+mkdir -p "$HOME/.claude/skills"
+cp -R integrations/claude-code/skills/nightshift "$HOME/.claude/skills/"
+
 # Install frontend deps
 echo "  Installing frontend dependencies..."
 cd frontend

@@ -84,6 +84,18 @@ cd claude-devfleet
 # API: http://localhost:18801
 ```
 
+### Night Shift on your own machine
+
+Use spare overnight Claude quota to work through your build list while you sleep.
+
+1. **Log Claude Code in with your subscription** (`claude`, then `/login`). Night Shift exists to use your plan's 5-hour usage blocks; with `ANTHROPIC_API_KEY` set, every token is billed instead.
+2. **Start DevFleet:** `./start.sh`. This also installs the `/nightshift` skill into `~/.claude/skills/`.
+3. **Keep the machine awake and the API running overnight.** On macOS: `caffeinate -i ./start.sh`, on power. On Linux, run it under `tmux`, `systemd` or similar.
+4. **Plan tonight's work:** open Claude Code in your project repo and run `/nightshift`, then describe what you want. It registers the repo with DevFleet if needed, reads the code, asks about anything ambiguous, shows you the plan, and queues it once you say yes.
+5. **Morning:** `/nightshift report` lists what finished, what failed and why, and the commits waiting on the `nightshift` branch. Merge what you like.
+
+Change the window with `DEVFLEET_NIGHT_START` / `DEVFLEET_NIGHT_END` (HH:MM, Europe/London).
+
 ### Option B: Manual local setup
 
 ```bash
@@ -159,7 +171,9 @@ docker compose up -d
 - **Night-Window Scheduling** — Configure a per-project dispatch window (e.g. 23:00–07:00) so overnight agent capacity gets used deliberately (`/api/projects/{id}/window`)
 - **Nightly Summaries** — Per-window rollup of what ran, what it cost, and what it produced (`/api/projects/{id}/nightly-runs`)
 
-All six have a working data model and API today. **Capacity limits and the night-window gate don't affect real dispatch yet** — that wiring into the mission watcher and auto-loop is still open; see `CLAUDE.md`.
+- **Night Shift** — Tag missions `night` and they run unattended inside a global window (default 20:00–08:00 Europe/London), resume their own session after rate-limit or transient failures (every 20 min, up to 30 tries), run one at a time per repo, and land on a `nightshift` branch instead of main for morning review. The `/nightshift` Claude Code skill (`integrations/claude-code/`) turns requirements into a queued night build list after asking you about anything ambiguous.
+
+All six have a working data model and API today. **Per-project capacity limits and per-project night windows don't affect real dispatch yet** (Night Shift uses its own global window) — that wiring into the mission watcher and auto-loop is still open; see `CLAUDE.md`.
 
 ### MCP Ecosystem
 
@@ -516,6 +530,10 @@ docker top devfleet-api | grep claude  # check before restarting
 | `DEVFLEET_CONTEXT_MODE_CMD` | `context-mode` | Path to context-mode binary |
 | `DEVFLEET_PROJECTS_DIR` | `projects/` | Base directory for planner-created projects |
 | `DEVFLEET_PATH_MAP_*` | — | Host:container path translation |
+| `DEVFLEET_API_URL` | `http://localhost:18801` | API base used by agents' MCP tools and night auto-resume |
+| `DEVFLEET_NIGHT_START` / `DEVFLEET_NIGHT_END` | `20:00` / `08:00` | Night Shift window (Europe/London) |
+| `DEVFLEET_NIGHT_RESUME_GAP_MIN` | `20` | Minutes between auto-resume attempts for a rate-limited night mission |
+| `DEVFLEET_NIGHT_RESUME_MAX` | `30` | Max auto-resume attempts per night mission |
 
 ## Contributing
 

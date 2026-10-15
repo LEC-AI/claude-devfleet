@@ -54,7 +54,7 @@ _cl.parse_message = _patched_parse
 
 import db
 from prompt_template import build_prompt
-from worktree import create_worktree, cleanup_worktree
+from worktree import create_worktree, cleanup_worktree, NIGHT_BRANCH
 from models import TOOL_PRESETS, DispatchOptions
 
 import httpx
@@ -192,12 +192,12 @@ def _validate_completion(
     return True, ""
 
 
-async def _worktree_had_commits(project_path: str, session_id: str) -> bool:
-    """Check whether the worktree branch has commits ahead of master."""
+async def _worktree_had_commits(project_path: str, session_id: str, base: str = "HEAD") -> bool:
+    """Check whether the worktree branch has commits ahead of its base."""
     short_id = session_id[:8]
     branch_name = f"devfleet/{short_id}"
     proc = await asyncio.create_subprocess_exec(
-        "git", "log", f"HEAD..{branch_name}", "--oneline",
+        "git", "log", f"{base}..{branch_name}", "--oneline",
         cwd=project_path,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -865,7 +865,12 @@ async def _run_agent(
             try:
                 post_master_status = await _master_status_lines(project_path)
                 escaped = post_master_status - pre_master_status
-                if escaped:
+                if escaped and _is_night(mission):
+                    escape_error_msg = (
+                        "night mission wrote outside its worktree; left uncommitted in the "
+                        f"live checkout for review: {', '.join(sorted(escaped)[:5])}"
+                    )
+                elif escaped:
                     ok_rec, rec_msg, rec_files = await _recover_cwd_escape(
                         project_path, session_id, escaped,
                     )
@@ -880,7 +885,9 @@ async def _run_agent(
         worktree_had_commits = False
         if worktree_path:
             try:
-                worktree_had_commits = await _worktree_had_commits(project_path, session_id)
+                worktree_had_commits = await _worktree_had_commits(
+                    project_path, session_id, NIGHT_BRANCH if _is_night(mission) else "HEAD",
+                )
             except Exception as e:
                 log.warning("Failed to check worktree commits for %s: %s", session_id, e)
 
@@ -895,11 +902,15 @@ async def _run_agent(
         merge_failed = False
         merge_error_msg = ""
         if validation_ok and worktree_path:
-            merge_result = await cleanup_worktree(project_path, session_id, merge=True)
+            merge_result = await cleanup_worktree(
+                project_path, session_id, merge=True,
+                into=NIGHT_BRANCH if _is_night(mission) else None,
+            )
             if merge_result is False:
                 merge_failed = True
                 merge_error_msg = (
-                    f"Auto-merge of devfleet/{session_id[:8]} into master failed "
+                    f"Auto-merge of devfleet/{session_id[:8]} into "
+                    f"{NIGHT_BRANCH if _is_night(mission) else 'master'} failed "
                     f"(uncommitted changes or conflict). Branch and worktree preserved "
                     f"at {worktree_path}. Use recover_mission to retry from chat."
                 )
@@ -1143,6 +1154,30 @@ async def _run_agent(
                 pass
 
 
+def _is_night(mission: dict) -> bool:
+    """Night-shift missions land on NIGHT_BRANCH for morning review, never on main."""
+    tags = mission.get("tags") or "[]"
+    return "night" in (json.loads(tags) if isinstance(tags, str) else tags)
+
+
+async def _fail_night_without_worktree(session_id: str, mission: dict) -> None:
+    """A night agent in the live checkout would commit straight to main: refuse."""
+    log.error("Night mission %s has no worktree; refusing to run in the live checkout", mission["id"])
+    conn = await db.get_db()
+    try:
+        await conn.execute(
+            """UPDATE agent_sessions SET status='failed', ended_at=datetime('now'),
+                   error_type='permanent_error', last_error=? WHERE id=?""",
+            ("Night mission needs a git worktree (git repo with a commit); refusing to run in the live checkout.",
+             session_id),
+        )
+        await conn.execute("UPDATE missions SET status='failed', updated_at=datetime('now') WHERE id=?",
+                           (mission["id"],))
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
 async def dispatch_mission(
     session_id: str,
     mission: dict,
@@ -1155,7 +1190,11 @@ async def dispatch_mission(
     full_prompt = build_prompt(mission, last_report)
     project_path = resolve_path(mission["project_path"])
 
-    worktree_path = await create_worktree(project_path, session_id)
+    worktree_path = await create_worktree(
+        project_path, session_id, base=NIGHT_BRANCH if _is_night(mission) else "HEAD",
+    )
+    if not worktree_path and _is_night(mission):
+        return await _fail_night_without_worktree(session_id, mission)
     work_dir = worktree_path or project_path
 
     await _run_agent(
@@ -1191,7 +1230,11 @@ async def resume_mission(
     finally:
         await conn.close()
 
-    worktree_path = await create_worktree(project_path, session_id)
+    worktree_path = await create_worktree(
+        project_path, session_id, base=NIGHT_BRANCH if _is_night(mission) else "HEAD",
+    )
+    if not worktree_path and _is_night(mission):
+        return await _fail_night_without_worktree(session_id, mission)
     work_dir = worktree_path or project_path
 
     await _run_agent(

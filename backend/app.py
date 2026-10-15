@@ -779,6 +779,8 @@ async def recover_mission_endpoint(mid: str):
         if not rows:
             raise HTTPException(404, "Mission not found")
         mission = dict(rows[0])
+        if "night" in json.loads(mission.get("tags") or "[]"):
+            raise HTTPException(400, "Night mission: its work belongs on the nightshift branch, review it by hand")
 
         sess_rows = await conn.execute_fetchall(
             """SELECT id, error_type, last_error FROM agent_sessions
