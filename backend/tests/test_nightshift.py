@@ -37,3 +37,25 @@ def test_default_night_window():
     at = lambda h: datetime(2026, 1, 15, h, 0, tzinfo=timezone.utc)  # January: London == UTC
     assert is_within_window(NIGHT_WINDOW, at(20)) and is_within_window(NIGHT_WINDOW, at(3))
     assert not is_within_window(NIGHT_WINDOW, at(8)) and not is_within_window(NIGHT_WINDOW, at(14))
+
+
+def test_one_night_mission_per_project_per_tick(temp_db, monkeypatch):
+    import json as _json
+    import db
+    import mission_watcher
+
+    monkeypatch.setattr(mission_watcher, "in_night_window", lambda: True)
+
+    async def run():
+        conn = await db.get_db()
+        await conn.execute("INSERT INTO projects (id, name, path) VALUES ('p1', 'p1', '/tmp/p1')")
+        for i in range(2):
+            await conn.execute(
+                "INSERT INTO missions (id, project_id, title, detailed_prompt, tags, auto_dispatch) "
+                "VALUES (?, 'p1', ?, 'x', ?, 1)", (f"m{i}", f"m{i}", _json.dumps(["night"])),
+            )
+        await conn.commit()
+        await conn.close()
+        return await mission_watcher._find_eligible_missions(limit=3)
+
+    assert len(asyncio.run(run())) == 1

@@ -75,7 +75,16 @@ async def _find_eligible_missions(limit: int) -> list[dict]:
                LIMIT ?""",
             (night_ok, limit),
         )
-        return [dict(r) for r in rows]
+        # The running-check above can't see missions picked in this same batch:
+        # keep at most one night mission per project per tick.
+        picked, night_projects = [], set()
+        for r in map(dict, rows):
+            if "night" in json.loads(r.get("tags") or "[]"):
+                if r["project_id"] in night_projects:
+                    continue
+                night_projects.add(r["project_id"])
+            picked.append(r)
+        return picked
     finally:
         await conn.close()
 
