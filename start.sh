@@ -5,6 +5,9 @@ cd "$SCRIPT_DIR"
 
 # Local settings (night window, ports, ...): see .env.example
 if [ -f .env ]; then set -a; . ./.env; set +a; fi
+PORT="${DEVFLEET_PORT:-18801}"
+UI_PORT="${DEVFLEET_UI_PORT:-3100}"
+export DEVFLEET_API_URL="${DEVFLEET_API_URL:-http://localhost:$PORT}"  # agents' MCP tools + UI proxy
 
 mkdir -p data
 
@@ -61,25 +64,25 @@ npm install --silent 2>/dev/null
 cd ..
 
 # Start backend (in venv)
-echo "  Starting Claude DevFleet API on port 18801..."
+echo "  Starting Claude DevFleet API on port $PORT..."
 cd backend
 source .venv/bin/activate
 # Loopback by default: the API can start coding agents, so don't expose it to the network
-python3 -m uvicorn app:app --host "${DEVFLEET_HOST:-127.0.0.1}" --port 18801 --reload &
+python3 -m uvicorn app:app --host "${DEVFLEET_HOST:-127.0.0.1}" --port "$PORT" --reload &
 API_PID=$!
 cd ..
 
 # Start frontend
-echo "  Starting Claude DevFleet UI on port 3100..."
+echo "  Starting Claude DevFleet UI on port $UI_PORT..."
 cd frontend
-npx vite --port 3100 &
+npx vite --port "$UI_PORT" --strictPort &
 UI_PID=$!
 cd ..
 
 echo ""
 echo "  +-----------------------------------------+"
-echo "  |  Claude DevFleet UI   -> http://localhost:3100  |"
-echo "  |  Claude DevFleet API  -> http://localhost:18801 |"
+echo "  |  Claude DevFleet UI   -> http://localhost:$UI_PORT"
+echo "  |  Claude DevFleet API  -> $DEVFLEET_API_URL"
 echo "  +-----------------------------------------+"
 echo ""
 echo "  Press Ctrl+C to stop all services."

@@ -34,7 +34,19 @@ If a clone already exists, run `git pull --ff-only` in it instead of cloning aga
 cp -n .env.example .env
 ```
 
-Set `DEVFLEET_NIGHT_TZ` in `.env` to the machine's IANA timezone. Find it with `readlink /etc/localtime` (the part after `zoneinfo/`) on macOS and Linux, or `timedatectl show -p Timezone --value` on Linux. Leave the 20:00–08:00 window unless the user asked for different hours.
+**Ports.** Check the defaults are free: `lsof -iTCP:18801 -sTCP:LISTEN` and `lsof -iTCP:3100 -sTCP:LISTEN`, or `ss -ltn | grep -E ':(18801|3100) '` on Linux. On a shared machine, another user's DevFleet may already have them. If either is taken, pick a free pair (for example 18821 and 3120) and set `DEVFLEET_PORT` and `DEVFLEET_UI_PORT` in `.env`.
+
+**API address for Claude Code.** If the API port isn't 18801, the `/nightshift` skill needs to know where it is. Add it to the `env` object in `~/.claude/settings.json`, creating the file or object if needed and keeping every other setting:
+
+```json
+{ "env": { "DEVFLEET_API_URL": "http://localhost:<DEVFLEET_PORT>" } }
+```
+
+It takes effect in new Claude Code sessions.
+
+**Timezone.** Set `DEVFLEET_NIGHT_TZ` in `.env` to the machine's IANA timezone. Find it with `readlink /etc/localtime` (the part after `zoneinfo/`) on macOS and Linux, or `timedatectl show -p Timezone --value` on Linux. Leave the 20:00–08:00 window unless the user asked for different hours.
+
+`<DEVFLEET_PORT>` and `<DEVFLEET_UI_PORT>` below mean the ports chosen here (18801 and 3100 by default).
 
 ## 4. Start DevFleet in the background
 
@@ -50,22 +62,22 @@ The first start installs Python and Node dependencies, which can take a few minu
 Wait until these pass (poll for up to about 5 minutes; check `data/devfleet.log` if they don't):
 
 ```bash
-curl -s localhost:18801/api/config/engine      # {"engine":"sdk","sdk_available":true}
+curl -s localhost:<DEVFLEET_PORT>/api/config/engine   # {"engine":"sdk","sdk_available":true}
 ls ~/.claude/skills/nightshift/SKILL.md         # /nightshift skill installed by start.sh
 ```
 
-The UI is at http://localhost:3100. The API only listens on localhost by default. Set `DEVFLEET_HOST=0.0.0.0` in `.env` only if the user wants it on the network, and warn them first: anyone who can reach the port can start coding agents on this machine.
+The UI is at http://localhost:<DEVFLEET_UI_PORT>. The API only listens on localhost by default. Set `DEVFLEET_HOST=0.0.0.0` in `.env` only if the user wants it on the network, and warn them first: anyone who can reach the port can start coding agents on this machine.
 
 ## 6. Register projects
 
 **Ask** the user which repos DevFleet should work on, as absolute paths. Each one must be a git repo with at least one commit. Register each:
 
 ```bash
-curl -s -X POST localhost:18801/api/projects -H 'content-type: application/json' \
+curl -s -X POST localhost:<DEVFLEET_PORT>/api/projects -H 'content-type: application/json' \
   -d '{"name": "<repo dir name>", "path": "<absolute path>"}'
 ```
 
-Skip any repo already listed by `curl -s localhost:18801/api/projects`. If the user doesn't know yet, skip this step: `/nightshift` registers a repo the first time it's used there.
+Skip any repo already listed by `curl -s localhost:<DEVFLEET_PORT>/api/projects`. If the user doesn't know yet, skip this step: `/nightshift` registers a repo the first time it's used there.
 
 ## 7. Hand over
 
@@ -74,4 +86,4 @@ Tell the user:
 1. **Plan tonight's work:** open Claude Code in a registered repo, run `/nightshift`, and describe what to build. It asks questions, shows a plan, and queues it once they approve. Agents run between the window's start and end times.
 2. **Morning:** run `/nightshift report`. Night work waits on each repo's `nightshift` branch and never touches `main`; merging is up to them.
 3. **After a reboot**, start DevFleet again with the step 4 command.
-4. **Stop DevFleet:** `pkill -f 'uvicorn app:app --host .* --port 18801'` and `pkill -f 'vite --port 3100'`.
+4. **Stop DevFleet:** `pkill -f 'port <DEVFLEET_PORT> --reload'` and `pkill -f 'vite --port <DEVFLEET_UI_PORT>'`, using the actual numbers. These match only this user's processes.

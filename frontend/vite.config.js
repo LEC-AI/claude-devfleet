@@ -7,7 +7,7 @@ export default defineConfig({
     port: 3100,
     proxy: {
       '/api': {
-        target: 'http://localhost:18801',
+        target: process.env.DEVFLEET_API_URL || 'http://localhost:18801',
         changeOrigin: true,
       },
     },

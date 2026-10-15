@@ -545,6 +545,7 @@ docker top devfleet-api | grep claude  # check before restarting
 | `DEVFLEET_NIGHT_START` / `DEVFLEET_NIGHT_END` | `20:00` / `08:00` | Night Shift window (HH:MM, in `DEVFLEET_NIGHT_TZ`) |
 | `DEVFLEET_NIGHT_TZ` | `Europe/London` | Night Shift window timezone (IANA name) |
 | `DEVFLEET_HOST` | `127.0.0.1` | API bind address used by `start.sh` (`0.0.0.0` exposes it to the network) |
+| `DEVFLEET_PORT` / `DEVFLEET_UI_PORT` | `18801` / `3100` | API and UI ports used by `start.sh` (pick free ones on a shared machine) |
 | `DEVFLEET_NIGHT_RESUME_GAP_MIN` | `20` | Minutes between auto-resume attempts for a rate-limited night mission |
 | `DEVFLEET_NIGHT_RESUME_MAX` | `30` | Max auto-resume attempts per night mission |
 
