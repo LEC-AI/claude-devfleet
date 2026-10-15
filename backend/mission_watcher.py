@@ -100,6 +100,9 @@ async def _find_resumable_night_missions(limit: int) -> list[str]:
                  SELECT id FROM agent_sessions WHERE mission_id = m.id
                  ORDER BY started_at DESC LIMIT 1)
                WHERE m.status = 'failed' AND """ + NIGHT_TAG_SQL + """
+                 AND NOT EXISTS (SELECT 1 FROM missions r WHERE r.project_id = m.project_id
+                   AND r.status = 'running'
+                   AND EXISTS (SELECT 1 FROM json_each(r.tags) t WHERE t.value = 'night'))
                  AND s.error_type IN (?, ?, ?)
                  AND s.claude_session_id IS NOT NULL AND s.claude_session_id != ''
                  AND datetime(s.ended_at) <= datetime('now', ?)
@@ -108,6 +111,7 @@ async def _find_resumable_night_missions(limit: int) -> list[str]:
                  AND NOT EXISTS (SELECT 1 FROM mission_events e
                       WHERE e.mission_id = m.id AND e.event_type = 'night_auto_resumed'
                         AND datetime(e.created_at) > datetime('now', ?))
+               GROUP BY m.project_id
                ORDER BY m.priority DESC, m.created_at ASC
                LIMIT ?""",
             (*RESUMABLE_ERRORS, f"-{NIGHT_RESUME_GAP_MIN} minutes", NIGHT_RESUME_MAX,

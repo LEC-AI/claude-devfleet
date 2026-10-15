@@ -1160,6 +1160,24 @@ def _is_night(mission: dict) -> bool:
     return "night" in (json.loads(tags) if isinstance(tags, str) else tags)
 
 
+async def _fail_night_without_worktree(session_id: str, mission: dict) -> None:
+    """A night agent in the live checkout would commit straight to main: refuse."""
+    log.error("Night mission %s has no worktree; refusing to run in the live checkout", mission["id"])
+    conn = await db.get_db()
+    try:
+        await conn.execute(
+            """UPDATE agent_sessions SET status='failed', ended_at=datetime('now'),
+                   error_type='permanent_error', last_error=? WHERE id=?""",
+            ("Night mission needs a git worktree (git repo with a commit); refusing to run in the live checkout.",
+             session_id),
+        )
+        await conn.execute("UPDATE missions SET status='failed', updated_at=datetime('now') WHERE id=?",
+                           (mission["id"],))
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
 async def dispatch_mission(
     session_id: str,
     mission: dict,
@@ -1175,6 +1193,8 @@ async def dispatch_mission(
     worktree_path = await create_worktree(
         project_path, session_id, base=NIGHT_BRANCH if _is_night(mission) else "HEAD",
     )
+    if not worktree_path and _is_night(mission):
+        return await _fail_night_without_worktree(session_id, mission)
     work_dir = worktree_path or project_path
 
     await _run_agent(
@@ -1213,6 +1233,8 @@ async def resume_mission(
     worktree_path = await create_worktree(
         project_path, session_id, base=NIGHT_BRANCH if _is_night(mission) else "HEAD",
     )
+    if not worktree_path and _is_night(mission):
+        return await _fail_night_without_worktree(session_id, mission)
     work_dir = worktree_path or project_path
 
     await _run_agent(

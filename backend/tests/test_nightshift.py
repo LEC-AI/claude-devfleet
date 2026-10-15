@@ -59,3 +59,26 @@ def test_one_night_mission_per_project_per_tick(temp_db, monkeypatch):
         return await mission_watcher._find_eligible_missions(limit=3)
 
     assert len(asyncio.run(run())) == 1
+
+
+def test_one_night_resume_per_project(temp_db):
+    import db
+    import mission_watcher
+
+    async def run():
+        conn = await db.get_db()
+        await conn.execute("INSERT INTO projects (id, name, path) VALUES ('p1', 'p1', '/tmp/p1')")
+        for i in range(2):
+            await conn.execute(
+                "INSERT INTO missions (id, project_id, title, detailed_prompt, tags, status) "
+                "VALUES (?, 'p1', ?, 'x', '[\"night\"]', 'failed')", (f"m{i}", f"m{i}"),
+            )
+            await conn.execute(
+                "INSERT INTO agent_sessions (id, mission_id, status, claude_session_id, error_type, ended_at) "
+                "VALUES (?, ?, 'failed', 'c', 'rate_limit_exhausted', datetime('now', '-1 hour'))", (f"s{i}", f"m{i}"),
+            )
+        await conn.commit()
+        await conn.close()
+        return await mission_watcher._find_resumable_night_missions(limit=3)
+
+    assert len(asyncio.run(run())) == 1
