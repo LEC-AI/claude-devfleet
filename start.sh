@@ -3,6 +3,9 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Local settings (night window, ports, ...): see .env.example
+if [ -f .env ]; then set -a; . ./.env; set +a; fi
+
 mkdir -p data
 
 echo ""
@@ -61,7 +64,8 @@ cd ..
 echo "  Starting Claude DevFleet API on port 18801..."
 cd backend
 source .venv/bin/activate
-python3 -m uvicorn app:app --host 0.0.0.0 --port 18801 --reload &
+# Loopback by default: the API can start coding agents, so don't expose it to the network
+python3 -m uvicorn app:app --host "${DEVFLEET_HOST:-127.0.0.1}" --port 18801 --reload &
 API_PID=$!
 cd ..
 

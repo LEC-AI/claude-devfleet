@@ -10,4 +10,4 @@ Plans new requirements with you (reads the repo, asks about anything ambiguous),
 mkdir -p ~/.claude/skills && cp -R integrations/claude-code/skills/nightshift ~/.claude/skills/
 ```
 
-Set `DEVFLEET_API_URL` if your API is not on `http://localhost:18801`.
+Set `DEVFLEET_API_URL` if your API is not on `http://localhost:18801`. Full machine setup: [SETUP.md](../../SETUP.md).
