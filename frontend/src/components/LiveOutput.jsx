@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import { parseUsage } from '../lib/usage.js';
 
 /* ────────────────────────────────────────────────────────────
    Inline styles — self-contained, no external CSS dependencies
@@ -323,23 +324,6 @@ function ToolBlock({ text }) {
       </div>
     </>
   );
-}
-
-
-/* ────────────────────────────────────────────────────────────
-   Usage footer data extraction
-   ──────────────────────────────────────────────────────────── */
-
-function parseUsage(text) {
-  if (!text) return null;
-  const tokens = {};
-  const costM = text.match(/\$[\d.]+/);
-  if (costM) tokens.cost = costM[0];
-  const inM = text.match(/(\d[\d,]*)\s*input/i);
-  if (inM) tokens.input = inM[1];
-  const outM = text.match(/(\d[\d,]*)\s*output/i);
-  if (outM) tokens.output = outM[1];
-  return Object.keys(tokens).length ? tokens : { raw: text };
 }
 
 
